@@ -1,0 +1,49 @@
+name: ci
+
+on:
+  pull_request:
+    branches: [main, dev]
+  push:
+    branches: [main]
+
+# Read-only token: no job here writes to the repository.
+permissions:
+  contents: read
+
+env:
+  # github.com/invokr-ai/acp is private for now: fetch it from GitHub with a
+  # read token rather than through the public module proxy.
+  GOPRIVATE: github.com/invokr-ai/*
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+      - name: Private modules
+        env:
+          TOKEN: ${{ secrets.ACP_READ_TOKEN }}
+        run: '[ -z "$TOKEN" ] || git config --global url."https://x-access-token:${TOKEN}@github.com/invokr-ai/".insteadOf "https://github.com/invokr-ai/"'
+      # Run through `go run` rather than golangci-lint-action: the org only
+      # allows GitHub-owned and a few listed actions.
+      - run: go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.15.0 run ./...
+
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+      - name: Private modules
+        env:
+          TOKEN: ${{ secrets.ACP_READ_TOKEN }}
+        run: '[ -z "$TOKEN" ] || git config --global url."https://x-access-token:${TOKEN}@github.com/invokr-ai/".insteadOf "https://github.com/invokr-ai/"'
+      - run: go test -race ./...
