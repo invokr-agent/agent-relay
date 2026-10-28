@@ -12,12 +12,13 @@ import (
 
 	"github.com/zalando/go-keyring"
 
+	"github.com/invokr-agent/agent-relay/clients/telegram"
 	"github.com/invokr-agent/agent-relay/internal/config"
 	"github.com/invokr-agent/agent-relay/internal/secrets"
 )
 
-func update(t *testing.T, chatType string, from, date int64, text string) tgUpdate {
-	var u tgUpdate
+func update(t *testing.T, chatType string, from, date int64, text string) telegram.Update {
+	var u telegram.Update
 	raw := fmt.Sprintf(`{"message":{"chat":{"type":%q},"from":{"id":%d},"date":%d,"text":%q}}`, chatType, from, date, text)
 	if err := json.Unmarshal([]byte(raw), &u); err != nil {
 		t.Fatal(err)
@@ -28,7 +29,7 @@ func update(t *testing.T, chatType string, from, date int64, text string) tgUpda
 func TestMatchCode(t *testing.T) {
 	attempts := map[int64]int{}
 	const code, issued = "ABCD2345", 100
-	for _, u := range []tgUpdate{update(t, "group", 7, issued, code), update(t, "private", 7, issued-1, code)} {
+	for _, u := range []telegram.Update{update(t, "group", 7, issued, code), update(t, "private", 7, issued-1, code)} {
 		if matchCode(u, code, issued, attempts) != nil {
 			t.Fatal("group or stale message paired")
 		}

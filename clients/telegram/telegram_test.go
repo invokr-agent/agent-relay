@@ -19,7 +19,7 @@ type fakeTelegramServer struct {
 	sendCalls    atomic.Int32
 	answerCalls  atomic.Int32
 	editCalls    atomic.Int32
-	updates      []tgUpdate
+	updates      []Update
 	callbackChan chan callbackInject
 }
 
@@ -50,23 +50,23 @@ func newFakeServer(t *testing.T, token string) *fakeTelegramServer {
 		// Check for injected callback
 		select {
 		case cb := <-f.callbackChan:
-			cq := tgCallbackQuery{
+			cq := CallbackQuery{
 				ID:      "cq1",
-				From:    &tgUser{ID: cb.from},
+				From:    &User{ID: cb.from},
 				Data:    "deny:" + cb.reqID,
-				Message: tgMessage{MessageID: 99, Chat: tgChat{ID: 111, Type: "private"}, Text: "approve?"},
+				Message: Message{MessageID: 99, Chat: Chat{ID: 111, Type: "private"}, Text: "approve?"},
 			}
 			if cb.approved {
 				cq.Data = "approve:" + cb.reqID
 			}
-			u := tgUpdate{UpdateID: 999, CallbackQuery: &cq}
-			_ = json.NewEncoder(w).Encode(map[string]any{"ok": true, "result": []tgUpdate{u}})
+			u := Update{UpdateID: 999, CallbackQuery: &cq}
+			_ = json.NewEncoder(w).Encode(map[string]any{"ok": true, "result": []Update{u}})
 			return
 		default:
 		}
 		// Long-poll: block briefly then return empty
 		time.Sleep(5 * time.Millisecond)
-		_ = json.NewEncoder(w).Encode(map[string]any{"ok": true, "result": []tgUpdate{}})
+		_ = json.NewEncoder(w).Encode(map[string]any{"ok": true, "result": []Update{}})
 	})
 	mux.HandleFunc(prefix+"sendMessage", func(w http.ResponseWriter, r *http.Request) {
 		f.sendCalls.Add(1)
@@ -108,11 +108,11 @@ func newClient(t *testing.T, token string, allowedIDs []int64, allowGroups bool,
 // One message arrives from an allowed chat.
 func TestListen_AllowedChat(t *testing.T) {
 	f := newFakeServer(t, "tok")
-	f.updates = []tgUpdate{{
+	f.updates = []Update{{
 		UpdateID: 1,
-		Message: &tgMessage{
-			MessageID: 10, Chat: tgChat{ID: 42, Type: "private"},
-			From: &tgUser{ID: 42, Username: "alice"}, Text: "hello",
+		Message: &Message{
+			MessageID: 10, Chat: Chat{ID: 42, Type: "private"},
+			From: &User{ID: 42, Username: "alice"}, Text: "hello",
 		},
 	}}
 	c := newClient(t, "tok", []int64{42}, false, f)
@@ -134,9 +134,9 @@ func TestListen_AllowedChat(t *testing.T) {
 
 func TestListen_DisallowedChat(t *testing.T) {
 	f := newFakeServer(t, "tok2")
-	f.updates = []tgUpdate{{
+	f.updates = []Update{{
 		UpdateID: 1,
-		Message:  &tgMessage{MessageID: 10, Chat: tgChat{ID: 999, Type: "private"}, From: &tgUser{ID: 999}, Text: "hi"},
+		Message:  &Message{MessageID: 10, Chat: Chat{ID: 999, Type: "private"}, From: &User{ID: 999}, Text: "hi"},
 	}}
 	c := newClient(t, "tok2", []int64{42}, false, f)
 	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
@@ -155,9 +155,9 @@ func TestListen_DisallowedChat(t *testing.T) {
 // T2b: empty allowlist denies everyone (fail closed).
 func TestListen_EmptyAllowlistDenies(t *testing.T) {
 	f := newFakeServer(t, "tok2b")
-	f.updates = []tgUpdate{{
+	f.updates = []Update{{
 		UpdateID: 1,
-		Message:  &tgMessage{MessageID: 10, Chat: tgChat{ID: 999, Type: "private"}, From: &tgUser{ID: 999}, Text: "hi"},
+		Message:  &Message{MessageID: 10, Chat: Chat{ID: 999, Type: "private"}, From: &User{ID: 999}, Text: "hi"},
 	}}
 	c := newClient(t, "tok2b", nil, false, f)
 	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
@@ -177,9 +177,9 @@ func TestListen_EmptyAllowlistDenies(t *testing.T) {
 func TestListen_GroupsNeedAllowGroups(t *testing.T) {
 	for _, allowGroups := range []bool{false, true} {
 		f := newFakeServer(t, "tok2c")
-		f.updates = []tgUpdate{{
+		f.updates = []Update{{
 			UpdateID: 1,
-			Message:  &tgMessage{MessageID: 10, Chat: tgChat{ID: -5, Type: "group"}, From: &tgUser{ID: 7}, Text: "hi"},
+			Message:  &Message{MessageID: 10, Chat: Chat{ID: -5, Type: "group"}, From: &User{ID: 7}, Text: "hi"},
 		}}
 		c := newClient(t, "tok2c", []int64{7}, allowGroups, f)
 		ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
@@ -341,7 +341,7 @@ func TestAskApproval_Timeout(t *testing.T) {
 func TestExpiredCallbackWithoutMessageIsAcknowledged(t *testing.T) {
 	f := newFakeServer(t, "expired")
 	c := newClient(t, "expired", nil, false, f)
-	c.handleCallback(context.Background(), &tgCallbackQuery{ID: "cq-expired", Data: "approve:gone"})
+	c.handleCallback(context.Background(), &CallbackQuery{ID: "cq-expired", Data: "approve:gone"})
 	if got := f.answerCalls.Load(); got != 1 {
 		t.Fatalf("expected callback acknowledgement, got %d", got)
 	}
@@ -362,11 +362,11 @@ func TestListen_RetryOn500(t *testing.T) {
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
-		updates := []tgUpdate{}
+		updates := []Update{}
 		if n == 2 {
-			updates = []tgUpdate{{
+			updates = []Update{{
 				UpdateID: 1,
-				Message:  &tgMessage{MessageID: 1, Chat: tgChat{ID: 42, Type: "private"}, From: &tgUser{ID: 42}, Text: "hello"},
+				Message:  &Message{MessageID: 1, Chat: Chat{ID: 42, Type: "private"}, From: &User{ID: 42}, Text: "hello"},
 			}}
 		}
 		_ = json.NewEncoder(w).Encode(map[string]any{"ok": true, "result": updates})

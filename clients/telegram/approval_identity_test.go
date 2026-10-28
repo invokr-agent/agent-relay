@@ -34,8 +34,8 @@ func TestApprovalIdentityAndCleanup(t *testing.T) {
 				}
 				switch scenario {
 				case "wrong peer":
-					client.dispatchUpdate(context.Background(), tgUpdate{CallbackQuery: &tgCallbackQuery{
-						ID: "wrong", From: &tgUser{ID: 7}, Data: "approve:request", Message: tgMessage{MessageID: 42, Chat: tgChat{ID: 222}},
+					client.dispatchUpdate(context.Background(), Update{CallbackQuery: &CallbackQuery{
+						ID: "wrong", From: &User{ID: 7}, Data: "approve:request", Message: Message{MessageID: 42, Chat: Chat{ID: 222}},
 					}}, nil)
 					if got, _ := client.pending.Load("request"); got != original {
 						t.Error("wrong allowed peer consumed request")
@@ -60,8 +60,8 @@ func TestApprovalIdentityAndCleanup(t *testing.T) {
 					cancel()
 				}
 				if scenario == "wrong peer" || scenario == "duplicate" {
-					client.dispatchUpdate(context.Background(), tgUpdate{CallbackQuery: &tgCallbackQuery{
-						ID: "right", From: &tgUser{ID: 7}, Data: "approve:request", Message: tgMessage{MessageID: 42, Chat: tgChat{ID: 111}},
+					client.dispatchUpdate(context.Background(), Update{CallbackQuery: &CallbackQuery{
+						ID: "right", From: &User{ID: 7}, Data: "approve:request", Message: Message{MessageID: 42, Chat: Chat{ID: 111}},
 					}}, nil)
 				}
 				_, _ = fmt.Fprint(w, `{"ok":true,"result":{"message_id":42}}`)
@@ -133,8 +133,8 @@ func TestUnacceptedCallbacksNeverClaimDecision(t *testing.T) {
 			if scenario == "wrong peer" {
 				client.pending.Store("request", &kit.PendingApproval{ChatID: "111", Sender: "7", Decision: make(chan bool, 1)})
 			}
-			client.dispatchUpdate(context.Background(), tgUpdate{CallbackQuery: &tgCallbackQuery{
-				ID: "callback", From: &tgUser{ID: 7}, Data: "approve:request", Message: tgMessage{MessageID: 42, Chat: tgChat{ID: 222}},
+			client.dispatchUpdate(context.Background(), Update{CallbackQuery: &CallbackQuery{
+				ID: "callback", From: &User{ID: 7}, Data: "approve:request", Message: Message{MessageID: 42, Chat: Chat{ID: 222}},
 			}}, nil)
 			if acknowledgements.Load() != 1 {
 				t.Fatal("callback spinner not acknowledged")

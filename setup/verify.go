@@ -2,63 +2,34 @@ package setup
 
 import (
 	"bufio"
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
 	"net/http"
-	"net/url"
 
 	signalcli "github.com/invokr-agent/agent-relay/clients/signal"
+	"github.com/invokr-agent/agent-relay/clients/telegram"
 )
 
 // telegramAPI is the Bot API base URL; tests point it at a fake.
 var telegramAPI = "https://api.telegram.org"
 
-type telegramUser struct {
-	ID       int64  `json:"id"`
-	Username string `json:"username"`
-}
-
-// telegramCall posts a Bot API method and decodes its result. Errors never
-// carry the request URL, which holds the token.
+// telegramCall posts a Bot API method and decodes its result.
 func telegramCall(ctx context.Context, token, method string, params, result any) error {
-	body, _ := json.Marshal(params)
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, telegramAPI+"/bot"+token+"/"+method, bytes.NewReader(body))
-	if err != nil {
-		return errors.New("setup: telegram: bad token")
-	}
-	req.Header.Set("Content-Type", "application/json")
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		if ue, ok := errors.AsType[*url.Error](err); ok {
-			err = ue.Err
-		}
-		return fmt.Errorf("setup: telegram: %w", err)
-	}
-	defer func() { _ = resp.Body.Close() }()
-	var reply struct {
-		OK          bool            `json:"ok"`
-		ErrorCode   int             `json:"error_code"`
-		Description string          `json:"description"`
-		Result      json.RawMessage `json:"result"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&reply); err != nil {
-		return fmt.Errorf("setup: telegram %s: %w", method, err)
-	}
-	if reply.ErrorCode == http.StatusConflict {
+	err := telegram.Call(ctx, http.DefaultClient, telegramAPI, token, method, params, result)
+	if e, ok := errors.AsType[*telegram.APIError](err); ok && e.Code == http.StatusConflict {
 		return errors.New("setup: telegram: another poller holds this bot; stop agent-relay (or deleteWebhook) before pairing")
 	}
-	if !reply.OK {
-		return fmt.Errorf("setup: telegram %s failed: %s", method, reply.Description)
+	if err != nil {
+		return fmt.Errorf("setup: %w", err)
 	}
-	return json.Unmarshal(reply.Result, result)
+	return nil
 }
 
-func telegramMe(ctx context.Context, token string) (telegramUser, error) {
-	var me telegramUser
+func telegramMe(ctx context.Context, token string) (telegram.User, error) {
+	var me telegram.User
 	return me, telegramCall(ctx, token, "getMe", map[string]any{}, &me)
 }
 

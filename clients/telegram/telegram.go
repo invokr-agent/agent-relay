@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -76,9 +75,11 @@ func (c *Client) pollLoop(ctx context.Context, out chan<- relay.Inbound) {
 		if ctx.Err() != nil {
 			return
 		}
-		updates, fatal, err := c.getUpdates(ctx, offset)
+		var updates []Update
+		err := c.call(ctx, "getUpdates", map[string]any{"offset": offset, "timeout": pollTimeout,
+			"allowed_updates": []string{"message", "callback_query"}}, &updates)
 		if err != nil {
-			if fatal || !kit.WaitBackoff(ctx, &backoff, maxBackoff) {
+			if e, ok := errors.AsType[*APIError](err); ok && e.Code == http.StatusUnauthorized || !kit.WaitBackoff(ctx, &backoff, maxBackoff) {
 				return
 			}
 			continue
@@ -93,7 +94,7 @@ func (c *Client) pollLoop(ctx context.Context, out chan<- relay.Inbound) {
 	}
 }
 
-func (c *Client) dispatchUpdate(ctx context.Context, u tgUpdate, out chan<- relay.Inbound) {
+func (c *Client) dispatchUpdate(ctx context.Context, u Update, out chan<- relay.Inbound) {
 	if u.CallbackQuery != nil {
 		if c.admits(u.CallbackQuery.Message.Chat, u.CallbackQuery.From) {
 			c.handleCallback(ctx, u.CallbackQuery)
@@ -112,11 +113,11 @@ func (c *Client) dispatchUpdate(ctx context.Context, u tgUpdate, out chan<- rela
 
 // admits reports whether an allow-listed user wrote in a chat type the
 // client serves. Fail closed: no sender or an empty list admits nobody.
-func (c *Client) admits(chat tgChat, from *tgUser) bool {
+func (c *Client) admits(chat Chat, from *User) bool {
 	return from != nil && c.allowedIDs[from.ID] && (chat.Type == "private" || c.allowGroups)
 }
 
-func (c *Client) handleCallback(ctx context.Context, cq *tgCallbackQuery) {
+func (c *Client) handleCallback(ctx context.Context, cq *CallbackQuery) {
 	reqID, approved := strings.TrimPrefix(cq.Data, "approve:"), true
 	if reqID == cq.Data {
 		if reqID, approved = strings.TrimPrefix(cq.Data, "deny:"), false; reqID == cq.Data {
@@ -124,10 +125,11 @@ func (c *Client) handleCallback(ctx context.Context, cq *tgCallbackQuery) {
 		}
 	}
 	edit := func(prefix string) {
-		_ = c.editMessageText(ctx, strconv.FormatInt(cq.Message.Chat.ID, 10), cq.Message.MessageID, prefix+": "+cq.Message.Text)
+		_ = c.call(ctx, "editMessageText", map[string]any{"chat_id": cq.Message.Chat.ID,
+			"message_id": cq.Message.MessageID, "text": prefix + ": " + cq.Message.Text}, nil)
 	}
 	value, ok := c.pending.Load(reqID)
-	_ = c.answerCallbackQuery(ctx, cq.ID)
+	_ = c.call(ctx, "answerCallbackQuery", map[string]any{"callback_query_id": cq.ID}, nil)
 	if ok {
 		p := value.(*kit.PendingApproval)
 		// In a group the chat is shared: only the user who started the turn
@@ -159,7 +161,7 @@ func (c *Client) handleCallback(ctx context.Context, cq *tgCallbackQuery) {
 // Send sends text to chatID, chunking at 4096 runes.
 func (c *Client) Send(ctx context.Context, chatID string, text string) error {
 	for _, chunk := range kit.ChunkMessage(text, chunkLimit) {
-		if _, err := c.sendMessage(ctx, chatID, chunk, nil); err != nil {
+		if err := c.sendMessage(ctx, chatID, chunk, nil); err != nil {
 			return err
 		}
 	}
@@ -173,8 +175,7 @@ func (c *Client) AskApproval(ctx context.Context, chatID string, req relay.Appro
 		markup := map[string]any{"inline_keyboard": [][]map[string]string{{
 			{"text": "✅ Approve", "callback_data": "approve:" + req.ID}, {"text": "❌ Deny", "callback_data": "deny:" + req.ID},
 		}}}
-		_, err := c.sendMessage(ctx, chatID, kit.ApprovalPromptText(req), markup)
-		return err
+		return c.sendMessage(ctx, chatID, kit.ApprovalPromptText(req), markup)
 	})
 }
 
@@ -184,135 +185,102 @@ func (c *Client) SetTyping(ctx context.Context, chatID string, active bool) erro
 	if !active {
 		return nil
 	}
-	body := map[string]any{"chat_id": chatID, "action": "typing"}
-	_, statusCode, err := c.apiPost(ctx, "sendChatAction", body)
-	if err != nil {
-		return err
-	}
-	if statusCode != http.StatusOK {
-		return fmt.Errorf("telegram: sendChatAction status %d", statusCode)
-	}
-	return nil
+	return c.call(ctx, "sendChatAction", map[string]any{"chat_id": chatID, "action": "typing"}, nil)
 }
 
-func (c *Client) getUpdates(ctx context.Context, offset int64) ([]tgUpdate, bool, error) {
-	body := map[string]any{"offset": offset, "timeout": pollTimeout, "allowed_updates": []string{"message", "callback_query"}}
-	raw, statusCode, err := c.apiPost(ctx, "getUpdates", body)
-	if err != nil {
-		return nil, false, err
-	}
-	if statusCode == http.StatusUnauthorized {
-		return nil, true, fmt.Errorf("telegram: unauthorized (bad token)")
-	}
-	if statusCode != http.StatusOK {
-		return nil, false, fmt.Errorf("telegram: getUpdates status %d", statusCode)
-	}
-	var resp struct {
-		OK     bool       `json:"ok"`
-		Result []tgUpdate `json:"result"`
-	}
-	if err := json.Unmarshal(raw, &resp); err != nil {
-		return nil, false, fmt.Errorf("telegram: decode updates: %w", err)
-	}
-	if !resp.OK {
-		return nil, false, fmt.Errorf("telegram: getUpdates not ok")
-	}
-	return resp.Result, false, nil
-}
-
-func (c *Client) sendMessage(ctx context.Context, chatID string, text string, replyMarkup any) (int64, error) {
+func (c *Client) sendMessage(ctx context.Context, chatID string, text string, replyMarkup any) error {
 	body := map[string]any{"chat_id": chatID, "text": text}
 	if replyMarkup != nil {
 		body["reply_markup"] = replyMarkup
 	}
-	raw, _, err := c.apiPost(ctx, "sendMessage", body)
-	if err != nil {
-		return 0, err
-	}
-	var resp struct {
-		OK     bool `json:"ok"`
-		Result struct {
-			MessageID int64 `json:"message_id"`
-		} `json:"result"`
-		ErrorCode   int    `json:"error_code"`
-		Description string `json:"description"`
-	}
-	if err := json.Unmarshal(raw, &resp); err != nil {
-		return 0, fmt.Errorf("telegram: decode sendMessage: %w", err)
-	}
-	if !resp.OK {
-		return 0, fmt.Errorf("telegram: sendMessage error %d: %s", resp.ErrorCode, resp.Description)
-	}
-	return resp.Result.MessageID, nil
+	return c.call(ctx, "sendMessage", body, nil)
 }
 
-func (c *Client) answerCallbackQuery(ctx context.Context, queryID string) error {
-	body := map[string]any{"callback_query_id": queryID}
-	_, _, err := c.apiPost(ctx, "answerCallbackQuery", body)
-	return err
+func (c *Client) call(ctx context.Context, method string, params, result any) error {
+	return Call(ctx, c.httpClient, c.baseURL, c.token, method, params, result)
 }
 
-func (c *Client) editMessageText(ctx context.Context, chatID string, messageID int64, text string) error {
-	body := map[string]any{"chat_id": chatID, "message_id": messageID, "text": text}
-	_, _, err := c.apiPost(ctx, "editMessageText", body)
-	return err
+// APIError is a Bot API call Telegram refused.
+type APIError struct {
+	Method      string
+	Code        int
+	Description string
 }
 
-func (c *Client) apiPost(ctx context.Context, method string, body any) ([]byte, int, error) {
-	raw, err := json.Marshal(body)
+func (e *APIError) Error() string {
+	return fmt.Sprintf("telegram: %s error %d: %s", e.Method, e.Code, e.Description)
+}
+
+// Call posts a Bot API method and decodes its result into result, if non-nil.
+// Errors never carry the request URL, which holds the token.
+func Call(ctx context.Context, hc *http.Client, baseURL, token, method string, params, result any) error {
+	body, err := json.Marshal(params)
 	if err != nil {
-		return nil, 0, fmt.Errorf("telegram: marshal %s: %w", method, err)
+		return fmt.Errorf("telegram: marshal %s: %w", method, err)
 	}
-	endpoint := fmt.Sprintf("%s/bot%s/%s", c.baseURL, c.token, method)
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(raw))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, baseURL+"/bot"+token+"/"+method, bytes.NewReader(body))
 	if err != nil {
-		return nil, 0, fmt.Errorf("telegram: build request %s: %w", method, err)
+		return errors.New("telegram: bad token")
 	}
 	req.Header.Set("Content-Type", "application/json")
-	resp, err := c.httpClient.Do(req)
+	resp, err := hc.Do(req)
 	if err != nil {
 		// *url.Error quotes the request URL, which holds the bot token.
 		if ue, ok := errors.AsType[*url.Error](err); ok {
 			err = ue.Err
 		}
-		return nil, 0, fmt.Errorf("telegram: %s: %w", method, err)
+		return fmt.Errorf("telegram: %s: %w", method, err)
 	}
 	defer func() { _ = resp.Body.Close() }()
-	data, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, resp.StatusCode, fmt.Errorf("telegram: read %s body: %w", method, err)
+	if resp.StatusCode == http.StatusUnauthorized {
+		return &APIError{method, resp.StatusCode, "unauthorized (bad token)"}
 	}
-	return data, resp.StatusCode, nil
+	var reply struct {
+		OK          bool            `json:"ok"`
+		ErrorCode   int             `json:"error_code"`
+		Description string          `json:"description"`
+		Result      json.RawMessage `json:"result"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&reply); err != nil {
+		return fmt.Errorf("telegram: %s: status %d: %w", method, resp.StatusCode, err)
+	}
+	if !reply.OK {
+		return &APIError{method, reply.ErrorCode, reply.Description}
+	}
+	if result == nil {
+		return nil
+	}
+	return json.Unmarshal(reply.Result, result)
 }
 
-// --- private types ---
-
-type tgUpdate struct {
-	UpdateID      int64            `json:"update_id"`
-	Message       *tgMessage       `json:"message"`
-	CallbackQuery *tgCallbackQuery `json:"callback_query"`
+// Update and the types below are the Bot API objects the relay reads.
+type Update struct {
+	UpdateID      int64          `json:"update_id"`
+	Message       *Message       `json:"message"`
+	CallbackQuery *CallbackQuery `json:"callback_query"`
 }
 
-type tgMessage struct {
-	MessageID int64   `json:"message_id"`
-	Chat      tgChat  `json:"chat"`
-	From      *tgUser `json:"from"`
-	Text      string  `json:"text"`
+type Message struct {
+	MessageID int64  `json:"message_id"`
+	Chat      Chat   `json:"chat"`
+	From      *User  `json:"from"`
+	Text      string `json:"text"`
+	Date      int64  `json:"date"`
 }
 
-type tgChat struct {
+type Chat struct {
 	ID   int64  `json:"id"`
 	Type string `json:"type"`
 }
 
-type tgUser struct {
+type User struct {
 	ID       int64  `json:"id"`
 	Username string `json:"username"`
 }
 
-type tgCallbackQuery struct {
-	ID      string    `json:"id"`
-	From    *tgUser   `json:"from"`
-	Data    string    `json:"data"`
-	Message tgMessage `json:"message"`
+type CallbackQuery struct {
+	ID      string  `json:"id"`
+	From    *User   `json:"from"`
+	Data    string  `json:"data"`
+	Message Message `json:"message"`
 }

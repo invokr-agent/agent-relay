@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/invokr-agent/agent-relay/clients/telegram"
 	"github.com/invokr-agent/agent-relay/internal/config"
 	"github.com/invokr-agent/agent-relay/internal/secrets"
 )
@@ -80,19 +81,6 @@ func newCode() string {
 	return string(b)
 }
 
-type tgUpdate struct {
-	UpdateID int64 `json:"update_id"`
-	Message  *struct {
-		Chat struct {
-			ID   int64  `json:"id"`
-			Type string `json:"type"`
-		} `json:"chat"`
-		From *telegramUser `json:"from"`
-		Text string        `json:"text"`
-		Date int64         `json:"date"`
-	} `json:"message"`
-}
-
 // pairTelegram long-polls the bot until a private chat sends the code (or
 // /start CODE through the t.me link). Run it with the relay stopped:
 // Telegram serves getUpdates to one poller.
@@ -106,7 +94,7 @@ func pairTelegram(ctx context.Context, t *config.Telegram, dir string, emit func
 		return err
 	}
 	// Skip the backlog: offset -1 returns only the latest update.
-	var updates []tgUpdate
+	var updates []telegram.Update
 	if err := telegramCall(ctx, token, "getUpdates", map[string]any{"offset": -1}, &updates); err != nil {
 		return err
 	}
@@ -128,7 +116,7 @@ func pairTelegram(ctx context.Context, t *config.Telegram, dir string, emit func
 			if user := matchCode(u, code, issued, attempts); user != nil {
 				// Confirm the offset so the relay does not see the code later;
 				// a failure only means the relay sees one stale message.
-				_ = telegramCall(ctx, token, "getUpdates", map[string]any{"offset": offset}, &[]tgUpdate{})
+				_ = telegramCall(ctx, token, "getUpdates", map[string]any{"offset": offset}, &[]telegram.Update{})
 				t.AllowedUserIDs = appendNew(t.AllowedUserIDs, user.ID)
 				_ = telegramCall(ctx, token, "sendMessage", map[string]any{"chat_id": user.ID, "text": "Paired with agent-relay."}, &struct{}{})
 				emit(Event{Event: "paired", UserID: user.ID, Name: user.Username})
@@ -141,7 +129,7 @@ func pairTelegram(ctx context.Context, t *config.Telegram, dir string, emit func
 // matchCode returns the sender of a private message, sent since issued, equal
 // to code (or /start code), counting each sender's attempts and ignoring
 // those past maxAttempts.
-func matchCode(u tgUpdate, code string, issued int64, attempts map[int64]int) *telegramUser {
+func matchCode(u telegram.Update, code string, issued int64, attempts map[int64]int) *telegram.User {
 	m := u.Message
 	if m == nil || m.From == nil || m.Chat.Type != "private" || m.Date < issued {
 		return nil

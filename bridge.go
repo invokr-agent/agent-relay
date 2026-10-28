@@ -62,16 +62,11 @@ func (c *chat) current() acp.SessionID {
 	return c.session
 }
 
-func (c *chat) setApprover(id string) {
+// set runs f under the chat's lock.
+func (c *chat) set(f func()) {
 	c.mu.Lock()
-	c.approver = id
-	c.mu.Unlock()
-}
-
-func (c *chat) setSession(id acp.SessionID) {
-	c.mu.Lock()
-	c.session = id
-	c.mu.Unlock()
+	defer c.mu.Unlock()
+	f()
 }
 
 // Run spawns agent, then serves every client until ctx ends.
@@ -112,13 +107,12 @@ func (b *Bridge) Run(ctx context.Context, agent *exec.Cmd) error {
 }
 
 func (b *Bridge) initialize(ctx context.Context, conn *acp.ClientConn) error {
-	b.conn = conn
+	b.conn, b.chats = conn, map[string]*chat{}
 	init, err := conn.Initialize(ctx, acp.InitializeRequest{ProtocolVersion: acp.V1,
 		ClientInfo: &acp.Implementation{Name: "agent-relay", Version: "0.1.0"}})
 	if err != nil {
 		return fmt.Errorf("messaging: initialize agent: %w", err)
 	}
-	b.chats = map[string]*chat{}
 	b.canLoad = init.AgentCapabilities != nil && init.AgentCapabilities.LoadSession
 	return nil
 }
@@ -208,10 +202,10 @@ func (b *Bridge) serve(ctx context.Context, c *chat) {
 		case <-ctx.Done():
 			return
 		case msg := <-c.inbox:
-			c.setApprover(msg.SenderID)
+			c.set(func() { c.approver = msg.SenderID })
 			err := b.handle(ctx, c, strings.TrimSpace(msg.Text))
 			// A permission request arriving after the turn has nobody to ask.
-			c.setApprover("")
+			c.set(func() { c.approver = "" })
 			if err != nil {
 				b.Logger.Error("turn failed", "chat", c.key, "err", err)
 				// The error stays in the log: its text can carry secrets
@@ -235,9 +229,7 @@ func (b *Bridge) handle(ctx context.Context, c *chat, text string) error {
 		}
 	}
 	// Drop text left by an earlier failed turn so it does not lead this reply.
-	c.mu.Lock()
-	c.reply.Reset()
-	c.mu.Unlock()
+	c.set(c.reply.Reset)
 	stop := b.typing(ctx, c)
 	resp, err := b.conn.Prompt(ctx, acp.PromptRequest{SessionID: c.current(),
 		Prompt: []acp.ContentBlock{{Text: &acp.TextContent{Text: text}}}})
@@ -255,15 +247,10 @@ func (b *Bridge) openSession(ctx context.Context, c *chat) error {
 	if stored == "" || !b.canLoad {
 		return b.newSession(ctx, c)
 	}
-	c.setSession(acp.SessionID(stored))
+	c.set(func() { c.session, c.loading = acp.SessionID(stored), true })
 	b.sessions.Store(c.current(), c)
-	c.mu.Lock()
-	c.loading = true
-	c.mu.Unlock()
 	_, err := b.conn.LoadSession(ctx, acp.LoadSessionRequest{SessionID: c.current(), Cwd: b.Cwd, MCPServers: []acp.MCPServer{}})
-	c.mu.Lock()
-	c.loading = false
-	c.mu.Unlock()
+	c.set(func() { c.loading = false })
 	if err != nil {
 		b.Logger.Warn("stored session did not load; starting a new one", "chat", c.key, "err", err)
 		return b.newSession(ctx, c)
@@ -277,7 +264,7 @@ func (b *Bridge) newSession(ctx context.Context, c *chat) error {
 		return fmt.Errorf("new session: %w", err)
 	}
 	b.sessions.Delete(c.current())
-	c.setSession(resp.SessionID)
+	c.set(func() { c.session = resp.SessionID })
 	b.sessions.Store(resp.SessionID, c)
 	return b.Store.SetSessionID(c.key, string(resp.SessionID))
 }

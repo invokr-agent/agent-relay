@@ -46,7 +46,7 @@ type Client struct {
 	mu             sync.Mutex
 	nextID         atomic.Int64
 	pending        sync.Map // map[request ID]*kit.PendingApproval
-	pendingRPC     sync.Map // map[int64]chan rpcResult
+	pendingRPC     sync.Map // map[int64]chan rpcMessage
 	dialer         func(network, address string) (net.Conn, error)
 }
 
@@ -93,7 +93,7 @@ func newWithDialer(socketPath, account string, allowedNumbers []string, dialer f
 		return nil, fmt.Errorf("signal: dial %s: %w", socketPath, err)
 	}
 	c.conn = conn
-	if err := c.subscribe(context.Background()); err != nil {
+	if err := c.subscribe(); err != nil {
 		_ = conn.Close()
 		return nil, err
 	}
@@ -112,34 +112,22 @@ func (c *Client) Listen(ctx context.Context) (<-chan relay.Inbound, error) {
 func (c *Client) readLoop(ctx context.Context, out chan<- relay.Inbound) {
 	defer close(out)
 	backoff := reconnectWait
-	for {
-		if ctx.Err() != nil {
-			return
-		}
-		conn, reader, buffered := c.currentReadState()
-		if conn == nil || reader == nil {
-			if !c.waitReconnect(ctx, &backoff) {
+	for ctx.Err() == nil {
+		c.mu.Lock()
+		conn, reader, buffered := c.conn, c.reader, c.preAckLines
+		c.preAckLines = nil
+		c.mu.Unlock()
+		if conn != nil && reader != nil {
+			_ = c.readConn(ctx, reader, buffered, out)
+			if ctx.Err() != nil {
 				return
 			}
-			continue
+			c.dropConn(conn)
 		}
-		_ = c.readConn(ctx, reader, buffered, out)
-		if ctx.Err() != nil {
-			return
-		}
-		c.dropConn(conn)
 		if !c.waitReconnect(ctx, &backoff) {
 			return
 		}
 	}
-}
-
-func (c *Client) currentReadState() (net.Conn, *bufio.Scanner, [][]byte) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	buffered := c.preAckLines
-	c.preAckLines = nil
-	return c.conn, c.reader, buffered
 }
 
 // dropConn closes conn and clears it if it's still the active connection.
@@ -160,7 +148,7 @@ func (c *Client) waitReconnect(ctx context.Context, backoff *time.Duration) bool
 	if !kit.WaitBackoff(ctx, backoff, maxBackoff) {
 		return false
 	}
-	if err := c.reconnect(ctx); err == nil {
+	if err := c.reconnect(); err == nil {
 		*backoff = reconnectWait
 	}
 	return true
@@ -184,11 +172,13 @@ func (c *Client) readConn(ctx context.Context, scanner *bufio.Scanner, buffered 
 	return io.EOF
 }
 
-type rpcNotification struct {
-	JSONRPC string          `json:"jsonrpc"`
-	Method  string          `json:"method"`
-	Params  json.RawMessage `json:"params"`
-	ID      *int64          `json:"id"`
+// rpcMessage is a JSON-RPC notification (no ID) or response.
+type rpcMessage struct {
+	ID     *int64          `json:"id"`
+	Method string          `json:"method"`
+	Params json.RawMessage `json:"params"`
+	Result json.RawMessage `json:"result"`
+	Error  *rpcError       `json:"error"`
 }
 
 type rpcError struct {
@@ -196,10 +186,7 @@ type rpcError struct {
 	Message string `json:"message"`
 }
 
-type rpcResult struct {
-	result json.RawMessage
-	err    error
-}
+func (e *rpcError) Error() string { return fmt.Sprintf("rpc error %d: %s", e.Code, e.Message) }
 
 type signalMessage struct {
 	Message           string          `json:"message"`
@@ -246,13 +233,18 @@ func (c *Client) withAccount(params map[string]any) map[string]any {
 }
 
 func (c *Client) dispatchLine(ctx context.Context, line []byte, out chan<- relay.Inbound) {
-	var notif rpcNotification
+	var notif rpcMessage
 	if err := json.Unmarshal(line, &notif); err != nil {
 		return
 	}
 	// Responses have an id; dispatch to waiting rpc() caller.
 	if notif.ID != nil {
-		c.dispatchRPCResponse(*notif.ID, line)
+		if v, ok := c.pendingRPC.Load(*notif.ID); ok {
+			select {
+			case v.(chan rpcMessage) <- notif:
+			default:
+			}
+		}
 		return
 	}
 	if notif.Method != "receive" {
@@ -293,18 +285,11 @@ func (c *Client) handleApprovalReply(source, text string) bool {
 	return true
 }
 
-func parseApprovalReply(text string) (bool, string, bool) {
-	fields := strings.Fields(text)
-	if len(fields) < 1 || len(fields) > 2 {
+func parseApprovalReply(text string) (approved bool, requestID string, ok bool) {
+	verb, requestID, _ := strings.Cut(strings.Join(strings.Fields(text), " "), " ")
+	verb = strings.ToUpper(verb)
+	if strings.Contains(requestID, " ") || verb != "YES" && verb != "NO" {
 		return false, "", false
-	}
-	verb := strings.ToUpper(fields[0])
-	if verb != "YES" && verb != "NO" {
-		return false, "", false
-	}
-	requestID := ""
-	if len(fields) == 2 {
-		requestID = fields[1]
 	}
 	return verb == "YES", requestID, true
 }
@@ -365,28 +350,6 @@ func buildApprovalPrompt(req relay.ApprovalRequest) string {
 		"\n\nReply YES <id> to approve or NO <id> to deny (bare YES/NO works when one request is pending).\nReply ID: " + req.ID
 }
 
-func (c *Client) dispatchRPCResponse(id int64, line []byte) {
-	v, ok := c.pendingRPC.Load(id)
-	if !ok {
-		return
-	}
-	ch := v.(chan rpcResult)
-	var resp struct {
-		Error  *rpcError       `json:"error"`
-		Result json.RawMessage `json:"result"`
-	}
-	var res rpcResult
-	if err := json.Unmarshal(line, &resp); err == nil && resp.Error != nil {
-		res.err = fmt.Errorf("signal: rpc error %d: %s", resp.Error.Code, resp.Error.Message)
-	} else if err == nil {
-		res.result = resp.Result
-	}
-	select {
-	case ch <- res:
-	default:
-	}
-}
-
 func rpcFrame(id int64, method string, params any) ([]byte, error) {
 	raw, err := json.Marshal(map[string]any{"jsonrpc": "2.0", "id": id, "method": method, "params": params})
 	if err != nil {
@@ -404,7 +367,7 @@ func (c *Client) rpc(ctx context.Context, method string, params map[string]any) 
 
 	ctx, cancel := context.WithTimeout(ctx, rpcTimeout)
 	defer cancel()
-	ch := make(chan rpcResult, 1)
+	ch := make(chan rpcMessage, 1)
 	c.pendingRPC.Store(id, ch)
 	defer c.pendingRPC.Delete(id)
 
@@ -419,13 +382,16 @@ func (c *Client) rpc(ctx context.Context, method string, params map[string]any) 
 	}
 	select {
 	case res := <-ch:
-		return res.result, res.err
+		if res.Error != nil {
+			return nil, fmt.Errorf("signal: %w", res.Error)
+		}
+		return res.Result, nil
 	case <-ctx.Done():
 		return nil, fmt.Errorf("signal: rpc %s: %w", method, ctx.Err())
 	}
 }
 
-func (c *Client) subscribe(_ context.Context) error {
+func (c *Client) subscribe() error {
 	id := c.nextID.Add(1)
 	raw, _ := rpcFrame(id, "subscribeReceive", c.withAccount(map[string]any{}))
 
@@ -459,16 +425,13 @@ func (c *Client) readSubscribeAck(scanner *bufio.Scanner, id int64) ([][]byte, e
 	var buffered [][]byte
 	for scanner.Scan() {
 		line := append([]byte(nil), scanner.Bytes()...)
-		var env struct {
-			ID    *int64    `json:"id"`
-			Error *rpcError `json:"error"`
-		}
+		var env rpcMessage
 		if err := json.Unmarshal(line, &env); err != nil || env.ID == nil || *env.ID != id {
 			buffered = append(buffered, line)
 			continue
 		}
 		if env.Error != nil {
-			return nil, fmt.Errorf("signal: subscribe: rpc error %d: %s", env.Error.Code, env.Error.Message)
+			return nil, fmt.Errorf("signal: subscribe: %w", env.Error)
 		}
 		return buffered, nil
 	}
@@ -478,7 +441,7 @@ func (c *Client) readSubscribeAck(scanner *bufio.Scanner, id int64) ([][]byte, e
 	return nil, fmt.Errorf("signal: subscribe ack: connection closed")
 }
 
-func (c *Client) reconnect(ctx context.Context) error {
+func (c *Client) reconnect() error {
 	conn, err := c.dialer("unix", c.socketPath)
 	if err != nil {
 		return fmt.Errorf("signal: reconnect: %w", err)
@@ -486,7 +449,7 @@ func (c *Client) reconnect(ctx context.Context) error {
 	c.mu.Lock()
 	c.conn = conn
 	c.mu.Unlock()
-	if err := c.subscribe(ctx); err != nil {
+	if err := c.subscribe(); err != nil {
 		c.dropConn(conn)
 		return fmt.Errorf("signal: reconnect subscribe: %w", err)
 	}
