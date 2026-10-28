@@ -319,7 +319,7 @@ func TestExpiredCallbackWithoutMessageIsAcknowledged(t *testing.T) {
 	}
 }
 
-// T8: transport retry on HTTP 500.
+// T8: client retry on HTTP 500.
 func TestListen_RetryOn500(t *testing.T) {
 	var calls atomic.Int32
 	mux := http.NewServeMux()
@@ -361,7 +361,7 @@ func TestListen_RetryOn500(t *testing.T) {
 	}
 }
 
-// T9: transport abort on 401.
+// T9: client abort on 401.
 func TestListen_AbortOn401(t *testing.T) {
 	mux := http.NewServeMux()
 	token := "tok9"
@@ -416,8 +416,8 @@ func TestChunkMessage_4097(t *testing.T) {
 	}
 }
 
-// Compile-time check that Client satisfies Transport.
-var _ relay.Transport = (*Client)(nil)
+// Compile-time check that Client satisfies Client.
+var _ relay.Client = (*Client)(nil)
 
 // Reference fmt to avoid unused import.
 var _ = fmt.Sprintf

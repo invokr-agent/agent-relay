@@ -16,7 +16,7 @@ import (
 )
 
 // The bridge tests run a fake ACP agent as a real subprocess (this test binary,
-// re-executed) and chat with it through a fake transport.
+// re-executed) and chat with it through a fake client.
 
 const fakeAgentEnv = "AGENT_RELAY_FAKE_AGENT"
 
@@ -86,29 +86,29 @@ func (a *fakeAgent) say(ctx context.Context, id acp.SessionID, text string) erro
 		Update: acp.SessionUpdate{AgentMessageChunk: &acp.ContentChunk{Content: acp.ContentBlock{Text: &acp.TextContent{Text: text}}}}})
 }
 
-// fakeTransport is one chat app: messages go in through in, what the bridge
+// fakeClient is one chat app: messages go in through in, what the bridge
 // sends comes out on sent, and approvals answer with approve.
-type fakeTransport struct {
+type fakeClient struct {
 	in      chan Inbound
 	sent    chan string
 	asked   chan ApprovalRequest
 	approve bool
 }
 
-func newFakeTransport(approve bool) *fakeTransport {
-	return &fakeTransport{in: make(chan Inbound), sent: make(chan string, 16), asked: make(chan ApprovalRequest, 4), approve: approve}
+func newFakeClient(approve bool) *fakeClient {
+	return &fakeClient{in: make(chan Inbound), sent: make(chan string, 16), asked: make(chan ApprovalRequest, 4), approve: approve}
 }
 
-func (f *fakeTransport) Name() string                                   { return "fake" }
-func (f *fakeTransport) Allowed(chatID string) bool                     { return chatID == "me" }
-func (f *fakeTransport) Listen(context.Context) (<-chan Inbound, error) { return f.in, nil }
+func (f *fakeClient) Name() string                                   { return "fake" }
+func (f *fakeClient) Allowed(chatID string) bool                     { return chatID == "me" }
+func (f *fakeClient) Listen(context.Context) (<-chan Inbound, error) { return f.in, nil }
 
-func (f *fakeTransport) Send(_ context.Context, _ string, text string) error {
+func (f *fakeClient) Send(_ context.Context, _ string, text string) error {
 	f.sent <- text
 	return nil
 }
 
-func (f *fakeTransport) AskApproval(ctx context.Context, _ string, req ApprovalRequest) (bool, error) {
+func (f *fakeClient) AskApproval(ctx context.Context, _ string, req ApprovalRequest) (bool, error) {
 	f.asked <- req
 	if !f.approve {
 		return false, nil
@@ -116,9 +116,9 @@ func (f *fakeTransport) AskApproval(ctx context.Context, _ string, req ApprovalR
 	return true, nil
 }
 
-func (f *fakeTransport) say(text string) { f.in <- Inbound{ChatID: "me", Text: text} }
+func (f *fakeClient) say(text string) { f.in <- Inbound{ChatID: "me", Text: text} }
 
-func (f *fakeTransport) next(t *testing.T) string {
+func (f *fakeClient) next(t *testing.T) string {
 	t.Helper()
 	select {
 	case s := <-f.sent:
@@ -130,14 +130,14 @@ func (f *fakeTransport) next(t *testing.T) string {
 }
 
 // startBridge runs a bridge on store against a fresh fake agent process.
-func startBridge(t *testing.T, store string, transport *fakeTransport) {
+func startBridge(t *testing.T, store string, client *fakeClient) {
 	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
 	s, err := NewStore(store)
 	if err != nil {
 		t.Fatal(err)
 	}
-	b := &Bridge{Store: s, Transports: []Transport{transport}, Logger: slog.New(slog.DiscardHandler), Cwd: t.TempDir()}
+	b := &Bridge{Store: s, Clients: []Client{client}, Logger: slog.New(slog.DiscardHandler), Cwd: t.TempDir()}
 	cmd := exec.Command(os.Args[0], "-test.run=^$")
 	cmd.Env = append(os.Environ(), fakeAgentEnv+"=1")
 	done := make(chan struct{})
@@ -146,7 +146,7 @@ func startBridge(t *testing.T, store string, transport *fakeTransport) {
 }
 
 func TestBridgeChatTurn(t *testing.T) {
-	chat := newFakeTransport(true)
+	chat := newFakeClient(true)
 	startBridge(t, filepath.Join(t.TempDir(), "sessions.json"), chat)
 	chat.say("hi")
 	if got := chat.next(t); got != "echo: hi (s1)" {
@@ -160,7 +160,7 @@ func TestBridgeChatTurn(t *testing.T) {
 
 func TestBridgeApprovals(t *testing.T) {
 	for approve, want := range map[bool]string{true: "echo: ran (s1)", false: "echo: skipped (s1)"} {
-		chat := newFakeTransport(approve)
+		chat := newFakeClient(approve)
 		startBridge(t, filepath.Join(t.TempDir(), "sessions.json"), chat)
 		chat.say("run")
 		if req := <-chat.asked; req.Tool != "rm -rf build" || req.Summary != "execute" {
@@ -173,7 +173,7 @@ func TestBridgeApprovals(t *testing.T) {
 }
 
 func TestBridgeCancelAndNew(t *testing.T) {
-	chat := newFakeTransport(true)
+	chat := newFakeClient(true)
 	startBridge(t, filepath.Join(t.TempDir(), "sessions.json"), chat)
 	chat.say("hi") // opens the session /cancel needs
 	chat.next(t)
@@ -197,13 +197,13 @@ func TestBridgeCancelAndNew(t *testing.T) {
 // history is not posted to the chat again.
 func TestBridgeResumesStoredSession(t *testing.T) {
 	store := filepath.Join(t.TempDir(), "sessions.json")
-	first := newFakeTransport(true)
+	first := newFakeClient(true)
 	startBridge(t, store, first)
 	first.say("hi")
 	if got := first.next(t); got != "echo: hi (s1)" {
 		t.Fatalf("first run: %q", got)
 	}
-	second := newFakeTransport(true)
+	second := newFakeClient(true)
 	startBridge(t, store, second)
 	second.say("again")
 	if got := second.next(t); got != "echo: again (s1)" || strings.Contains(got, "replayed") {

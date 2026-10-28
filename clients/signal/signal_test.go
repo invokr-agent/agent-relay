@@ -527,12 +527,12 @@ func TestListen_ReconnectsAfterCleanEOF(t *testing.T) {
 			t.Fatalf("unexpected message: %+v", msg)
 		}
 	case <-ctx.Done():
-		t.Fatal("no message after clean EOF; transport did not reconnect")
+		t.Fatal("no message after clean EOF; client did not reconnect")
 	}
 }
 
 // Compile-time check.
-var _ relay.Transport = (*Client)(nil)
+var _ relay.Client = (*Client)(nil)
 
 func TestAllowed(t *testing.T) {
 	c := &Client{allowedNumbers: map[string]bool{"+1test": true}}

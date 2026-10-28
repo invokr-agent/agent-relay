@@ -2,7 +2,7 @@
 //
 //	agent-relay -config agent-relay.json
 //
-// The config names the agent command to spawn and the transports to serve:
+// The config names the agent command to spawn and the clients to serve:
 //
 //	{
 //	  "agent": ["invokr", "acp"],
@@ -64,7 +64,7 @@ func run(path string, logger *slog.Logger) error {
 	if err != nil {
 		return err
 	}
-	transports, err := buildTransports(cfg, logger)
+	clients, err := buildClients(cfg, logger)
 	if err != nil {
 		return err
 	}
@@ -76,7 +76,7 @@ func run(path string, logger *slog.Logger) error {
 	defer stop()
 	agent := exec.CommandContext(ctx, cfg.Agent[0], cfg.Agent[1:]...)
 	agent.Stderr = os.Stderr
-	bridge := &relay.Bridge{Store: store, Transports: transports, Logger: logger, Cwd: cfg.Cwd}
+	bridge := &relay.Bridge{Store: store, Clients: clients, Logger: logger, Cwd: cfg.Cwd}
 	return bridge.Run(ctx, agent)
 }
 
@@ -106,10 +106,10 @@ func load(path string) (config, error) {
 	return cfg, nil
 }
 
-// buildTransports starts each configured transport. One without an allowlist
+// buildClients starts each configured client. One without an allowlist
 // or an explicit allow_all refuses to start: fail closed, never open to all.
-func buildTransports(cfg config, logger *slog.Logger) ([]relay.Transport, error) {
-	var out []relay.Transport
+func buildClients(cfg config, logger *slog.Logger) ([]relay.Client, error) {
+	var out []relay.Client
 	if t := cfg.Telegram; t.Token != "" {
 		if len(t.AllowedChatIDs) == 0 && !t.AllowAll {
 			return nil, errors.New("telegram: refusing to start with no allowed_chat_ids and allow_all unset")

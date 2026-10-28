@@ -21,6 +21,11 @@ const (
 )
 
 // Client is a Telegram Bot API long-poll client.
+var (
+	_ relay.Client = (*Client)(nil)
+	_ relay.Typer  = (*Client)(nil)
+)
+
 type Client struct {
 	token, baseURL string
 	allowedIDs     map[int64]bool

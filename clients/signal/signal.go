@@ -23,6 +23,11 @@ const (
 )
 
 // Client is a signal-cli JSON-RPC over UNIX socket client.
+var (
+	_ relay.Client = (*Client)(nil)
+	_ relay.Typer  = (*Client)(nil)
+)
+
 type Client struct {
 	socketPath     string
 	allowedNumbers map[string]bool

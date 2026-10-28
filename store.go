@@ -11,7 +11,7 @@ import (
 )
 
 // Store maps chat keys to agent session IDs, persisted as a JSON file.
-// A chat key is "<transport-name>:<chatID>", e.g. "telegram:123456789".
+// A chat key is "<client-name>:<chatID>", e.g. "telegram:123456789".
 //
 // The file is read once at construction and the map is the live copy; each
 // write rewrites the whole file atomically, so the mutex serializes writers

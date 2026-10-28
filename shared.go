@@ -6,7 +6,7 @@ import (
 	"time"
 )
 
-// ApprovalPromptText renders the approval body both transports share; each
+// ApprovalPromptText renders the approval body both clients share; each
 // appends whatever reply instructions its own channel needs.
 func ApprovalPromptText(req ApprovalRequest) string {
 	var b strings.Builder

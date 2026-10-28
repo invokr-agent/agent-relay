@@ -21,13 +21,13 @@ const (
 	typingRefresh   = 4 * time.Second
 )
 
-// Bridge connects chat transports to one ACP agent. Each chat gets its own
+// Bridge connects chat clients to one ACP agent. Each chat gets its own
 // agent session, kept across restarts in the Store. Messages from one chat run
 // one turn at a time; chats run concurrently.
 type Bridge struct {
-	Store      *Store
-	Transports []Transport
-	Logger     *slog.Logger
+	Store   *Store
+	Clients []Client
+	Logger  *slog.Logger
 	// Cwd is the working directory the agent's sessions are opened in.
 	Cwd string
 
@@ -40,7 +40,7 @@ type Bridge struct {
 
 type chat struct {
 	key, id string
-	t       Transport
+	t       Client
 	inbox   chan string
 	session acp.SessionID
 	mu      sync.Mutex
@@ -60,10 +60,10 @@ func (c *chat) setSession(id acp.SessionID) {
 	c.mu.Unlock()
 }
 
-// Run spawns agent, then serves every transport until ctx ends.
+// Run spawns agent, then serves every client until ctx ends.
 func (b *Bridge) Run(ctx context.Context, agent *exec.Cmd) error {
-	if len(b.Transports) == 0 {
-		return errors.New("messaging: no transports configured")
+	if len(b.Clients) == 0 {
+		return errors.New("messaging: no clients configured")
 	}
 	conn, err := acp.Spawn(ctx, b, agent)
 	if err != nil {
@@ -79,9 +79,9 @@ func (b *Bridge) Run(ctx context.Context, agent *exec.Cmd) error {
 	b.canLoad = init.AgentCapabilities != nil && init.AgentCapabilities.LoadSession
 	inbound := make(chan struct {
 		msg Inbound
-		t   Transport
+		t   Client
 	}, 64)
-	for _, t := range b.Transports {
+	for _, t := range b.Clients {
 		ch, err := t.Listen(ctx)
 		if err != nil {
 			return fmt.Errorf("messaging: %s listen: %w", t.Name(), err)
@@ -90,7 +90,7 @@ func (b *Bridge) Run(ctx context.Context, agent *exec.Cmd) error {
 			for msg := range ch {
 				inbound <- struct {
 					msg Inbound
-					t   Transport
+					t   Client
 				}{msg, t}
 			}
 		}()
@@ -107,7 +107,7 @@ func (b *Bridge) Run(ctx context.Context, agent *exec.Cmd) error {
 	}
 }
 
-func (b *Bridge) route(ctx context.Context, t Transport, msg Inbound) {
+func (b *Bridge) route(ctx context.Context, t Client, msg Inbound) {
 	if !t.Allowed(msg.ChatID) {
 		_ = t.Send(ctx, msg.ChatID, "Access denied.")
 		return
@@ -206,7 +206,7 @@ func (b *Bridge) newSession(ctx context.Context, c *chat) error {
 }
 
 // sendReply posts the turn's streamed answer as one message (chunked to the
-// transport's limit), noting a turn that did not end normally.
+// client's limit), noting a turn that did not end normally.
 func (b *Bridge) sendReply(ctx context.Context, c *chat, stop acp.StopReason) error {
 	c.mu.Lock()
 	reply := strings.TrimSpace(c.reply.String())
@@ -279,11 +279,9 @@ func (b *Bridge) RequestPermission(ctx context.Context, req acp.RequestPermissio
 	return acp.RequestPermissionResponse{Outcome: acp.RequestPermissionOutcome{Cancelled: &acp.RequestPermissionOutcomeCancelled{}}}, nil
 }
 
-// typing keeps the transport's typing indicator on, when it has one, until stop.
+// typing keeps the client's typing indicator on, when it has one, until stop.
 func (b *Bridge) typing(ctx context.Context, c *chat) (stop func()) {
-	typer, ok := c.t.(interface {
-		SetTyping(ctx context.Context, chatID string, active bool) error
-	})
+	typer, ok := c.t.(Typer)
 	if !ok {
 		return func() {}
 	}

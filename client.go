@@ -3,14 +3,14 @@ package relay
 import "context"
 
 type Inbound struct {
-	ChatID string // opaque per-transport chat identifier
+	ChatID string // opaque per-client chat identifier
 	Sender string // display name or number; used only for logging
 	Text   string
 }
 
-// Transport is implemented by each messaging backend.
+// Client is implemented by each messaging backend.
 // All methods must be safe to call concurrently from different goroutines.
-type Transport interface {
+type Client interface {
 	// Name returns a short stable identifier used in logs ("telegram", "signal").
 	Name() string
 
@@ -20,7 +20,7 @@ type Transport interface {
 	Allowed(chatID string) bool
 
 	// Listen starts receiving messages and sends them to the returned channel.
-	// The channel is closed when ctx is cancelled or a fatal transport error occurs.
+	// The channel is closed when ctx is cancelled or a fatal client error occurs.
 	Listen(ctx context.Context) (<-chan Inbound, error)
 
 	Send(ctx context.Context, chatID string, text string) error
@@ -29,6 +29,11 @@ type Transport interface {
 	// for a yes/no response. Returns (true, nil) on approval, (false, nil) on
 	// denial, and (false, err) on failure or context expiry.
 	AskApproval(ctx context.Context, chatID string, req ApprovalRequest) (bool, error)
+}
+
+// Typer is implemented by clients that can show a typing indicator.
+type Typer interface {
+	SetTyping(ctx context.Context, chatID string, active bool) error
 }
 
 // ApprovalRequest carries the fields needed for a user-facing approval prompt.
