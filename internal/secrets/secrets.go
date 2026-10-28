@@ -75,3 +75,10 @@ func readFile(dir string) (map[string]string, error) {
 	}
 	return m, json.Unmarshal(data, &m)
 }
+
+// InFile reports whether the fallback file in dir holds the named secret.
+func InFile(dir, name string) bool {
+	m, err := readFile(dir)
+	_, ok := m[name]
+	return err == nil && ok
+}

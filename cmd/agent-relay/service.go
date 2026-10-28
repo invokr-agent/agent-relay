@@ -2,14 +2,18 @@ package main
 
 import (
 	"errors"
+	"flag"
 	"fmt"
 	"html"
 	"os"
 	"os/exec"
+	"os/user"
 	"path/filepath"
 	"runtime"
+	"strings"
 
 	"github.com/invokr-agent/agent-relay/internal/config"
+	"github.com/invokr-agent/agent-relay/internal/secrets"
 )
 
 const launchdLabel = "com.invokr-agent.agent-relay"
@@ -21,27 +25,56 @@ var runCmd = func(name string, args ...string) error {
 	return cmd.Run()
 }
 
-// runService serves `agent-relay service install|uninstall|status` as a
-// per-user service: systemd --user on Linux, a launchd agent on macOS.
+// runService serves `agent-relay service [-config path] install|uninstall|status`
+// as a per-user service: systemd --user on Linux, a launchd agent on macOS.
 func runService(args []string) error {
-	if len(args) != 1 {
-		return errors.New("usage: agent-relay service install|uninstall|status")
+	fs := flag.NewFlagSet("service", flag.ContinueOnError)
+	path := fs.String("config", config.Path(), "config file the service runs with")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if fs.NArg() != 1 {
+		return errors.New("usage: agent-relay service [-config path] install|uninstall|status")
 	}
 	if os.Geteuid() == 0 {
 		return errors.New("service: run as your user, not root")
+	}
+	cfg, err := filepath.Abs(*path)
+	if err != nil {
+		return err
 	}
 	exe, err := os.Executable()
 	if err != nil {
 		return err
 	}
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return err
+	action := fs.Arg(0)
+	if action == "install" {
+		warnKeyringOnly(cfg)
 	}
 	if runtime.GOOS == "darwin" {
-		return launchd(args[0], filepath.Join(home, "Library/LaunchAgents", launchdLabel+".plist"), plist(exe, config.Path()))
+		home, _ := os.UserHomeDir()
+		return launchd(action, filepath.Join(home, "Library/LaunchAgents", launchdLabel+".plist"),
+			plist(exe, cfg, filepath.Join(home, "Library/Logs/agent-relay.log")))
 	}
-	return systemd(args[0], filepath.Join(filepath.Dir(config.Dir()), "systemd/user/agent-relay.service"), unit(exe, config.Path()))
+	return systemd(action, filepath.Join(filepath.Dir(config.Dir()), "systemd/user/agent-relay.service"), unit(exe, cfg))
+}
+
+// warnKeyringOnly flags a Telegram token kept only in the keyring: a service
+// running without a desktop session may find the keyring locked or absent.
+func warnKeyringOnly(cfgPath string) {
+	cfg, err := config.Load(cfgPath)
+	if err != nil || cfg.Telegram == nil || os.Getenv("AGENT_RELAY_TELEGRAM_TOKEN") != "" || secrets.InFile(filepath.Dir(cfgPath), secrets.TelegramToken) {
+		return
+	}
+	fmt.Fprintln(os.Stderr, "note: the Telegram token is in the OS keyring, which a service without a desktop session may not reach; "+
+		"if the service cannot read it, set AGENT_RELAY_TELEGRAM_TOKEN in the service environment or store it in secrets.json beside the config")
+}
+
+// sdQuote quotes s for a systemd unit line: C-style quoting, then % and $
+// doubled so neither is expanded.
+func sdQuote(s string) string {
+	s = strings.NewReplacer(`\`, `\\`, `"`, `\"`, "%", "%%", "$", "$$").Replace(s)
+	return `"` + s + `"`
 }
 
 func unit(exe, cfg string) string {
@@ -49,17 +82,19 @@ func unit(exe, cfg string) string {
 Description=agent-relay chat bridge
 
 [Service]
-ExecStart=%q -config %q
+ExecStart=%s -config %s
+Environment=%s
 Restart=on-failure
 RestartSec=5
 NoNewPrivileges=yes
 
 [Install]
 WantedBy=default.target
-`, exe, cfg)
+`, sdQuote(exe), sdQuote(cfg), sdQuote("PATH="+os.Getenv("PATH")))
 }
 
-func plist(exe, cfg string) string {
+func plist(exe, cfg, log string) string {
+	e := html.EscapeString
 	return fmt.Sprintf(`<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -67,11 +102,14 @@ func plist(exe, cfg string) string {
   <key>Label</key><string>%s</string>
   <key>ProgramArguments</key>
   <array><string>%s</string><string>-config</string><string>%s</string></array>
+  <key>EnvironmentVariables</key><dict><key>PATH</key><string>%s</string></dict>
+  <key>StandardOutPath</key><string>%s</string>
+  <key>StandardErrorPath</key><string>%s</string>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><dict><key>SuccessfulExit</key><false/></dict>
 </dict>
 </plist>
-`, launchdLabel, html.EscapeString(exe), html.EscapeString(cfg))
+`, launchdLabel, e(exe), e(cfg), e(os.Getenv("PATH")), e(log), e(log))
 }
 
 func systemd(action, path, content string) error {
@@ -84,7 +122,15 @@ func systemd(action, path, content string) error {
 		if err := sc("daemon-reload"); err != nil {
 			return err
 		}
-		return sc("enable", "--now", "agent-relay.service")
+		if err := sc("enable", "--now", "agent-relay.service"); err != nil {
+			return err
+		}
+		if u, err := user.Current(); err == nil {
+			if _, err := os.Stat("/var/lib/systemd/linger/" + u.Username); err != nil {
+				fmt.Fprintln(os.Stderr, "note: to keep the relay running while you are logged out: loginctl enable-linger "+u.Username)
+			}
+		}
+		return nil
 	case "uninstall":
 		_ = sc("disable", "--now", "agent-relay.service")
 		if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
@@ -99,21 +145,25 @@ func systemd(action, path, content string) error {
 
 func launchd(action, path, content string) error {
 	domain := fmt.Sprintf("gui/%d", os.Getuid())
+	target := domain + "/" + launchdLabel
 	switch action {
 	case "install":
 		if err := config.WriteFile(path, []byte(content)); err != nil {
 			return err
 		}
-		_ = runCmd("launchctl", "bootout", domain+"/"+launchdLabel)
+		// bootout is asynchronous, so a loaded agent is restarted in place.
+		if runCmd("launchctl", "print", target) == nil {
+			return runCmd("launchctl", "kickstart", "-k", target)
+		}
 		return runCmd("launchctl", "bootstrap", domain, path)
 	case "uninstall":
-		_ = runCmd("launchctl", "bootout", domain+"/"+launchdLabel)
+		_ = runCmd("launchctl", "bootout", target)
 		if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
 			return err
 		}
 		return nil
 	case "status":
-		return runCmd("launchctl", "print", domain+"/"+launchdLabel)
+		return runCmd("launchctl", "print", target)
 	}
 	return fmt.Errorf("service: unknown action %q", action)
 }

@@ -52,7 +52,7 @@ agent-relay   # reads $XDG_CONFIG_HOME/agent-relay/config.json
 
 ## Service
 
-`agent-relay service install|uninstall|status` runs the relay as your user: a systemd `--user` unit (`Restart=on-failure`, `NoNewPrivileges=yes`) on Linux, a launchd agent on macOS. It refuses to run as root.
+`agent-relay service [-config path] install|uninstall|status` runs the relay as your user with your current `PATH`: a systemd `--user` unit (`Restart=on-failure`, `NoNewPrivileges=yes`) on Linux, a launchd agent logging to `~/Library/Logs/agent-relay.log` on macOS. It refuses to run as root. On Linux, `loginctl enable-linger $USER` keeps it running while you are logged out. A service without a desktop session may not reach the keyring: keep the token in `secrets.json` or `AGENT_RELAY_TELEGRAM_TOKEN` then.
 
 ## Verify a release
 
