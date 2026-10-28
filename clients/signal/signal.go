@@ -382,10 +382,7 @@ func (c *Client) readSubscribeAck(scanner *bufio.Scanner, id int64) ([][]byte, e
 		}
 		return buffered, nil
 	}
-	if err := scanner.Err(); err != nil {
-		return nil, fmt.Errorf("signal: subscribe ack read: %w", err)
-	}
-	return nil, fmt.Errorf("signal: subscribe ack: connection closed")
+	return nil, fmt.Errorf("signal: subscribe ack: connection closed: %w", cmp.Or(scanner.Err(), io.EOF))
 }
 
 func (c *Client) reconnect() error {

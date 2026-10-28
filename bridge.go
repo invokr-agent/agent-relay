@@ -48,8 +48,8 @@ type chat struct {
 	t        Client
 	inbox    chan Inbound
 	session  acp.SessionID
-	approver string       // SenderID of the prompt in flight; "" between prompts
-	turn     atomic.Int64 // bumped as each prompt starts and ends: an answer outliving its prompt is refused
+	approver string // SenderID of the prompt in flight; "" between prompts
+	turn     int64  // bumped as each prompt starts and ends: an answer outliving its prompt is refused
 	window   time.Time
 	count    int // messages since window; Run's goroutine only
 	mu       sync.Mutex
@@ -228,12 +228,10 @@ func (b *Bridge) handle(ctx context.Context, c *chat, msg Inbound) error {
 	// Drop text left by an earlier failed turn so it does not lead this reply.
 	c.set(c.reply.Reset)
 	stop := b.typing(ctx, c)
-	c.turn.Add(1)
-	c.set(func() { c.approver = msg.SenderID })
+	c.set(func() { c.approver = msg.SenderID; c.turn++ })
 	resp, err := b.conn.Prompt(ctx, acp.PromptRequest{SessionID: c.current(),
 		Prompt: []acp.ContentBlock{{Text: &acp.TextContent{Text: text}}}})
-	c.set(func() { c.approver = "" })
-	c.turn.Add(1)
+	c.set(func() { c.approver = ""; c.turn++ })
 	stop()
 	if err != nil {
 		return err
@@ -316,7 +314,7 @@ func (b *Bridge) RequestPermission(ctx context.Context, req acp.RequestPermissio
 	}
 	c := v.(*chat)
 	c.mu.Lock()
-	approver, turn := c.approver, c.turn.Load()
+	approver, turn := c.approver, c.turn
 	c.mu.Unlock()
 	if approver == "" {
 		b.Logger.Warn("permission request outside a turn; denied", "chat", c.key)
@@ -336,6 +334,7 @@ func (b *Bridge) RequestPermission(ctx context.Context, req acp.RequestPermissio
 	approved, err := c.t.AskApproval(askCtx, c.id, ar)
 	// A timeout is a denial: an unanswered prompt never lets the tool run.
 	timedOut := err != nil && ctx.Err() == nil && errors.Is(err, context.DeadlineExceeded)
+	c.set(func() { approved = approved && c.turn == turn })
 	decision := "denied"
 	switch {
 	case timedOut:
@@ -344,7 +343,7 @@ func (b *Bridge) RequestPermission(ctx context.Context, req acp.RequestPermissio
 	case err != nil:
 		b.audit(c, ar, "error: "+err.Error())
 		return acp.RequestPermissionResponse{}, err
-	case approved && c.turn.Load() == turn:
+	case approved:
 		decision = "approved"
 	}
 	b.audit(c, ar, decision)

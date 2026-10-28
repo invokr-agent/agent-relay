@@ -327,8 +327,7 @@ type staleClient struct {
 }
 
 func (s staleClient) AskApproval(ctx context.Context, chatID string, req ApprovalRequest) (bool, error) {
-	s.c.set(func() { s.c.approver = "u2" })
-	s.c.turn.Add(2)
+	s.c.set(func() { s.c.approver = "u2"; s.c.turn += 2 })
 	return s.fakeClient.AskApproval(ctx, chatID, req)
 }
 
