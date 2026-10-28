@@ -20,7 +20,7 @@ agent-relay setup --apply telegram <answers.json
 
 `agent-relay setup --pair <client>` streams JSON events (`code`, `qr`, `waiting`, `paired`, `error`) for up to 5 minutes. Telegram shows a one-time 8-character code: the first user to send it to the bot in a private chat is allow-listed (single use, 5 attempts per user; stop the relay first, as Telegram serves one poller). Signal emits a `sgnl://linkdevice` URI to show as a QR code and links signal-cli (daemon without `--account`) to the scanning phone, recording its number as `account`.
 
-`--apply` validates the answers, verifies them (Telegram `getMe`, a signal-cli ping), stores secrets, and merges the rest into the config. Secrets are never printed. Front ends such as invokr drive `--describe`/`--apply`; the `setup` Go package holds the same logic without UI.
+`--apply` reads one JSON object of strings (at most 64 KiB; unknown keys refused) and answers `{"setup_protocol":1,"ok":true}` or `{"setup_protocol":1,"ok":false,"field":"<key>","error":"..."}` on stdout. Field `pattern`s are Go RE2 regexps matched against the trimmed answer; list answers replace the stored list. It validates the answers, verifies them (Telegram `getMe`, a signal-cli ping), merges them into the config, then stores secrets. Secrets are never printed. Front ends such as invokr drive `--describe`/`--apply`; the `setup` Go package holds the same logic without UI.
 
 ## Run
 

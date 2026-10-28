@@ -32,3 +32,24 @@ func TestSetupApplyNeverEchoesSecrets(t *testing.T) {
 		t.Fatalf("apply = %v, %q", err, out.String())
 	}
 }
+
+func TestSetupApplyReportsJSON(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	for in, field := range map[string]string{
+		`{"token":"x","bogus":"y"}`:        "bogus",
+		`{"token":"x"} {}`:                 "",
+		strings.Repeat(" ", 70<<10) + `{}`: "",
+	} {
+		var out bytes.Buffer
+		if runSetup([]string{"--apply", "telegram"}, strings.NewReader(in), &out) == nil {
+			t.Fatalf("%.20q applied", in)
+		}
+		var got map[string]any
+		if err := json.Unmarshal(out.Bytes(), &got); err != nil || got["ok"] != false || got["setup_protocol"] != 1.0 || (got["field"] != nil) != (field != "") {
+			t.Fatalf("%.20q: %s", in, out.String())
+		}
+	}
+	if runSetup([]string{"--describe", "irc"}, nil, &bytes.Buffer{}) == nil {
+		t.Fatal("unknown client described")
+	}
+}

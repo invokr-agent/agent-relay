@@ -5,7 +5,6 @@ package setup
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"path/filepath"
 	"regexp"
@@ -27,7 +26,7 @@ type Field struct {
 	Help     string `json:"help,omitempty"`
 	Secret   bool   `json:"secret,omitempty"`
 	Required bool   `json:"required,omitempty"`
-	Pattern  string `json:"pattern,omitempty"` // regexp the answer must match
+	Pattern  string `json:"pattern,omitempty"` // Go RE2 regexp the trimmed answer must match
 }
 
 // Descriptor tells a front end what to ask for one client.
@@ -47,44 +46,57 @@ var descriptors = []Descriptor{
 	{Client: "telegram", Pairing: "code", Notice: "Telegram is not end-to-end encrypted; prefer Signal for sensitive work.",
 		Fields: []Field{
 			{Key: "token", Label: "Bot token", Help: "from @BotFather", Secret: true, Required: true, Pattern: `^[0-9]+:[A-Za-z0-9_-]{30,}$`},
-			{Key: "allowed_user_ids", Label: "Allowed user IDs", Help: "comma-separated; or pair later", Pattern: `^[0-9, ]*$`},
+			{Key: "allowed_user_ids", Label: "Allowed user IDs", Help: "comma-separated; replaces the list; or pair later", Pattern: `^[0-9, ]*$`},
 			agentField,
 		}},
 	{Client: "signal", Pairing: "qr",
 		Fields: []Field{
 			{Key: "socket", Label: "signal-cli socket", Help: "Unix socket of signal-cli in JSON-RPC daemon mode", Required: true},
 			{Key: "account", Label: "Signal account", Help: "the relay's number, e.g. +15551234567", Pattern: `^(\+[0-9]+)?$`},
-			{Key: "allowed_numbers", Label: "Allowed numbers", Help: "comma-separated", Pattern: `^[0-9+, ]*$`},
+			{Key: "allowed_numbers", Label: "Allowed numbers", Help: "comma-separated; replaces the list", Pattern: `^[0-9+, ]*$`},
 			agentField,
 		}},
 }
 
-// Describe returns every client's descriptor, or only client's when named.
+// FieldError reports a bad answer by its key, never its value.
+type FieldError struct{ Key, Problem string }
+
+func (e *FieldError) Error() string { return "setup: " + e.Key + " " + e.Problem }
+
+// Describe returns copies of every client's descriptor, or only client's.
 func Describe(client string) ([]Descriptor, error) {
-	if client == "" {
-		return descriptors, nil
+	var out []Descriptor
+	for _, d := range descriptors {
+		if client == "" || d.Client == client {
+			d.Fields = slices.Clone(d.Fields)
+			out = append(out, d)
+		}
 	}
-	i := slices.IndexFunc(descriptors, func(d Descriptor) bool { return d.Client == client })
-	if i < 0 {
+	if len(out) == 0 {
 		return nil, fmt.Errorf("setup: unknown client %q", client)
 	}
-	return descriptors[i : i+1], nil
+	return out, nil
 }
 
-// Validate checks answers against client's fields. Errors name the field,
-// never its value.
+// Validate checks trimmed answers against client's fields; unknown keys are
+// refused.
 func Validate(client string, a Answers) error {
 	d, err := Describe(client)
 	if err != nil {
 		return err
 	}
+	for key := range a {
+		if !slices.ContainsFunc(d[0].Fields, func(f Field) bool { return f.Key == key }) {
+			return &FieldError{key, "is not a field of " + client}
+		}
+	}
 	for _, f := range d[0].Fields {
-		v := strings.TrimSpace(a[f.Key])
+		v := a[f.Key]
 		if v == "" && f.Required {
-			return fmt.Errorf("setup: %s is required", f.Key)
+			return &FieldError{f.Key, "is required"}
 		}
 		if v != "" && f.Pattern != "" && !regexp.MustCompile(f.Pattern).MatchString(v) {
-			return fmt.Errorf("setup: %s is not valid", f.Key)
+			return &FieldError{f.Key, "is not valid"}
 		}
 	}
 	return nil
@@ -100,9 +112,15 @@ func Verify(ctx context.Context, client string, a Answers) error {
 	return signalPing(ctx, a["socket"])
 }
 
-// Apply validates and verifies the answers, stores secrets, and merges the
-// rest into the config at path.
+// Apply validates and verifies the answers, then writes the config before
+// the secret: a failed secret write leaves a config that fails closed (no
+// token) rather than a stored token no config points to.
 func Apply(ctx context.Context, path, client string, a Answers) error {
+	trimmed := Answers{}
+	for k, v := range a {
+		trimmed[k] = strings.TrimSpace(v)
+	}
+	a = trimmed
 	if err := Validate(client, a); err != nil {
 		return err
 	}
@@ -116,29 +134,33 @@ func Apply(ctx context.Context, path, client string, a Answers) error {
 	if argv := strings.Fields(a["agent"]); len(argv) > 0 {
 		cfg.Agent = argv
 	}
-	if client == "telegram" {
-		err = applyTelegram(&cfg, filepath.Dir(path), a)
-	} else {
+	switch client {
+	case "telegram":
+		return applyTelegram(&cfg, path, a)
+	default:
 		applySignal(&cfg, a)
+		return config.Save(path, cfg)
 	}
-	if err != nil {
-		return err
-	}
-	return config.Save(path, cfg)
 }
 
-func applyTelegram(cfg *config.Config, dir string, a Answers) error {
+func applyTelegram(cfg *config.Config, path string, a Answers) error {
 	if cfg.Telegram == nil {
 		cfg.Telegram = &config.Telegram{}
 	}
-	for _, s := range splitList(a["allowed_user_ids"]) {
-		id, err := strconv.ParseInt(s, 10, 64)
-		if err != nil {
-			return errors.New("setup: allowed_user_ids is not valid")
+	if list := splitList(a["allowed_user_ids"]); len(list) > 0 {
+		cfg.Telegram.AllowedUserIDs = nil
+		for _, s := range list {
+			id, err := strconv.ParseInt(s, 10, 64)
+			if err != nil {
+				return &FieldError{"allowed_user_ids", "is not valid"}
+			}
+			cfg.Telegram.AllowedUserIDs = appendNew(cfg.Telegram.AllowedUserIDs, id)
 		}
-		cfg.Telegram.AllowedUserIDs = appendNew(cfg.Telegram.AllowedUserIDs, id)
 	}
-	_, err := secrets.Set(dir, secrets.TelegramToken, strings.TrimSpace(a["token"]))
+	if err := config.Save(path, *cfg); err != nil {
+		return err
+	}
+	_, err := secrets.Set(filepath.Dir(path), secrets.TelegramToken, a["token"])
 	return err
 }
 
@@ -146,12 +168,12 @@ func applySignal(cfg *config.Config, a Answers) {
 	if cfg.Signal == nil {
 		cfg.Signal = &config.Signal{}
 	}
-	cfg.Signal.Socket = strings.TrimSpace(a["socket"])
-	if acct := strings.TrimSpace(a["account"]); acct != "" {
-		cfg.Signal.Account = acct
+	cfg.Signal.Socket = a["socket"]
+	if a["account"] != "" {
+		cfg.Signal.Account = a["account"]
 	}
-	for _, n := range splitList(a["allowed_numbers"]) {
-		cfg.Signal.AllowedNumbers = appendNew(cfg.Signal.AllowedNumbers, n)
+	if list := splitList(a["allowed_numbers"]); len(list) > 0 {
+		cfg.Signal.AllowedNumbers = slices.Compact(list)
 	}
 }
 

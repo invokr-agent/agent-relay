@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bufio"
 	"context"
 	"encoding/json"
 	"errors"
@@ -10,6 +9,7 @@ import (
 	"io"
 	"os"
 	"strings"
+	"time"
 
 	"golang.org/x/term"
 
@@ -17,10 +17,16 @@ import (
 	"github.com/invokr-agent/agent-relay/setup"
 )
 
+// maxAnswers bounds the answers JSON read from stdin.
+const maxAnswers = 64 << 10
+
+// verifyTimeout bounds --apply and interactive setup, verification included.
+const verifyTimeout = 30 * time.Second
+
 // runSetup serves `agent-relay setup`:
 //
 //	setup --describe [client]   descriptors as JSON
-//	setup --apply <client>      answers JSON on stdin; verify, store, write config
+//	setup --apply <client>      answers JSON on stdin; verify, write config, store secrets
 //	setup --pair <client>       pair, streaming JSON events
 //	setup [client]              interactive prompts
 func runSetup(args []string, stdin io.Reader, stdout io.Writer) error {
@@ -32,7 +38,6 @@ func runSetup(args []string, stdin io.Reader, stdout io.Writer) error {
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	ctx := context.Background()
 	enc := json.NewEncoder(stdout)
 	switch {
 	case *describe:
@@ -42,28 +47,47 @@ func runSetup(args []string, stdin io.Reader, stdout io.Writer) error {
 		}
 		return enc.Encode(map[string]any{"setup_protocol": setup.Protocol, "clients": d})
 	case *apply != "":
-		var answers setup.Answers
-		if err := json.NewDecoder(stdin).Decode(&answers); err != nil {
-			return errors.New("setup: answers must be a JSON object of strings")
-		}
-		if err := setup.Apply(ctx, *path, *apply, answers); err != nil {
-			return err
-		}
-		return enc.Encode(map[string]any{"setup_protocol": setup.Protocol, "client": *apply, "ok": true})
+		return applyJSON(*path, *apply, stdin, enc)
 	case *pair != "":
-		err := setup.Pair(ctx, *path, *pair, func(e setup.Event) { _ = enc.Encode(e) })
+		err := setup.Pair(context.Background(), *path, *pair, func(e setup.Event) { _ = enc.Encode(e) })
 		if err != nil {
 			_ = enc.Encode(setup.Event{Event: "error", Message: err.Error()})
 		}
 		return err
 	}
+	ctx, cancel := context.WithTimeout(context.Background(), verifyTimeout)
+	defer cancel()
 	return interactive(ctx, *path, fs.Arg(0), stdin, stdout)
 }
 
+// applyJSON answers --apply on stdout: {"setup_protocol":1,"ok":true} or
+// {"setup_protocol":1,"ok":false,"field":key,"error":message}.
+func applyJSON(path, client string, stdin io.Reader, enc *json.Encoder) error {
+	ctx, cancel := context.WithTimeout(context.Background(), verifyTimeout)
+	defer cancel()
+	var answers setup.Answers
+	dec := json.NewDecoder(io.LimitReader(stdin, maxAnswers))
+	err := dec.Decode(&answers)
+	if err != nil || dec.More() {
+		err = errors.New("setup: answers must be one JSON object of strings, at most 64 KiB")
+	} else {
+		err = setup.Apply(ctx, path, client, answers)
+	}
+	reply := map[string]any{"setup_protocol": setup.Protocol, "ok": err == nil}
+	if err != nil {
+		reply["error"] = err.Error()
+		if fe, ok := errors.AsType[*setup.FieldError](err); ok {
+			reply["field"] = fe.Key
+		}
+	}
+	_ = enc.Encode(reply)
+	return err
+}
+
 // interactive asks for each field of one client on plain lines; secrets are
-// read without echo when stdin is a terminal.
-func interactive(ctx context.Context, path, client string, stdin io.Reader, out io.Writer) error {
-	in := bufio.NewReader(stdin)
+// read without echo when stdin is a terminal. Lines are read unbuffered so
+// the terminal reads and line reads never split stdin between them.
+func interactive(ctx context.Context, path, client string, in io.Reader, out io.Writer) error {
 	if client == "" {
 		_, _ = fmt.Fprint(out, "Client (telegram, signal): ")
 		client = readLine(in)
@@ -78,7 +102,7 @@ func interactive(ctx context.Context, path, client string, stdin io.Reader, out 
 	answers := setup.Answers{}
 	for _, f := range d[0].Fields {
 		_, _ = fmt.Fprintf(out, "%s (%s): ", f.Label, f.Help)
-		answers[f.Key] = readAnswer(in, f.Secret)
+		answers[f.Key] = readAnswer(in, out, f.Secret)
 	}
 	if err := setup.Apply(ctx, path, client, answers); err != nil {
 		return err
@@ -87,16 +111,22 @@ func interactive(ctx context.Context, path, client string, stdin io.Reader, out 
 	return nil
 }
 
-func readAnswer(in *bufio.Reader, secret bool) string {
-	if fd := int(os.Stdin.Fd()); secret && term.IsTerminal(fd) {
-		b, _ := term.ReadPassword(fd)
-		fmt.Println()
+func readAnswer(in io.Reader, out io.Writer, secret bool) string {
+	if f, ok := in.(*os.File); ok && secret && term.IsTerminal(int(f.Fd())) {
+		b, _ := term.ReadPassword(int(f.Fd()))
+		_, _ = fmt.Fprintln(out)
 		return string(b)
 	}
 	return readLine(in)
 }
 
-func readLine(in *bufio.Reader) string {
-	s, _ := in.ReadString('\n')
-	return strings.TrimSpace(s)
+func readLine(in io.Reader) string {
+	var line []byte
+	b := make([]byte, 1)
+	for {
+		if n, err := in.Read(b); n == 0 || err != nil || b[0] == '\n' {
+			return strings.TrimSpace(string(line))
+		}
+		line = append(line, b[0])
+	}
 }

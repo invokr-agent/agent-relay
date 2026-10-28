@@ -3,6 +3,7 @@ package setup
 import (
 	"bufio"
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -11,6 +12,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/zalando/go-keyring"
 
@@ -137,5 +139,55 @@ func TestApplySignal(t *testing.T) {
 	}
 	if Verify(context.Background(), "signal", Answers{"socket": "/nonexistent"}) == nil {
 		t.Fatal("missing socket verified")
+	}
+}
+
+func TestVerifyFailureLeavesStateAlone(t *testing.T) {
+	keyring.MockInit()
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	fakeTelegram(t, getMe)
+	bad := "9" + token
+	err := Apply(context.Background(), config.Path(), "telegram", Answers{"token": bad})
+	if err == nil || strings.Contains(err.Error(), bad) {
+		t.Fatalf("err = %v", err)
+	}
+	if _, err := os.Stat(config.Path()); !os.IsNotExist(err) {
+		t.Fatal("config written after failed verify")
+	}
+	if _, err := secrets.Get(config.Dir(), secrets.TelegramToken); err == nil {
+		t.Fatal("secret stored after failed verify")
+	}
+}
+
+func TestApplyRejectsUnknownAndOverflow(t *testing.T) {
+	keyring.MockInit()
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	fakeTelegram(t, getMe)
+	for key, a := range map[string]Answers{
+		"bogus":            {"token": token, "bogus": "s3cret"},
+		"allowed_user_ids": {"token": token, "allowed_user_ids": "99999999999999999999"},
+	} {
+		err := Apply(context.Background(), config.Path(), "telegram", a)
+		fe, ok := errors.AsType[*FieldError](err)
+		if !ok || fe.Key != key || strings.Contains(err.Error(), "s3cret") {
+			t.Errorf("%s: %v", key, err)
+		}
+	}
+}
+
+func TestDescribeReturnsCopies(t *testing.T) {
+	d, _ := Describe("telegram")
+	d[0].Fields[0].Key = "mutated"
+	if again, _ := Describe("telegram"); again[0].Fields[0].Key != "token" {
+		t.Fatal("Describe exposed package state")
+	}
+}
+
+func TestSignalNoResponseTimesOut(t *testing.T) {
+	sock := fakeSignal(t, func(string) []string { return nil })
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	if Verify(ctx, "signal", Answers{"socket": sock}) == nil {
+		t.Fatal("silent signal-cli verified")
 	}
 }
