@@ -255,7 +255,7 @@ func TestBridgeCancelAndNew(t *testing.T) {
 	chat.say("hi") // opens the session /cancel needs
 	chat.next(t)
 	chat.say("wait")
-	time.Sleep(100 * time.Millisecond) // let the turn reach the agent
+	time.Sleep(100 * time.Millisecond)
 	chat.say("/cancel")
 	if got := chat.next(t); got != "⏹ stopped" {
 		t.Fatalf("cancelled turn sent %q", got)

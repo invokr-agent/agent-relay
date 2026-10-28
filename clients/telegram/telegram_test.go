@@ -47,7 +47,6 @@ func newFakeServer(t *testing.T, token string) *fakeTelegramServer {
 			_ = json.NewEncoder(w).Encode(map[string]any{"ok": true, "result": f.updates})
 			return
 		}
-		// Check for injected callback
 		select {
 		case cb := <-f.callbackChan:
 			cq := CallbackQuery{
@@ -64,7 +63,6 @@ func newFakeServer(t *testing.T, token string) *fakeTelegramServer {
 			return
 		default:
 		}
-		// Long-poll: block briefly then return empty
 		time.Sleep(5 * time.Millisecond)
 		_ = json.NewEncoder(w).Encode(map[string]any{"ok": true, "result": []Update{}})
 	})
@@ -148,11 +146,9 @@ func TestListen_DisallowedChat(t *testing.T) {
 			t.Fatalf("expected nothing, got %+v", msg)
 		}
 	case <-ctx.Done():
-		// correct: nothing received
 	}
 }
 
-// T2b: empty allowlist denies everyone (fail closed).
 func TestListen_EmptyAllowlistDenies(t *testing.T) {
 	f := newFakeServer(t, "tok2b")
 	f.updates = []Update{{
@@ -169,7 +165,6 @@ func TestListen_EmptyAllowlistDenies(t *testing.T) {
 			t.Fatalf("expected nothing with empty allowlist, got %+v", msg)
 		}
 	case <-ctx.Done():
-		// correct: nothing received
 	}
 }
 
@@ -209,7 +204,6 @@ func TestSend_ShortText(t *testing.T) {
 	}
 }
 
-// T4: send text >4096 chars — two sendMessage calls, each ≤4096 runes.
 func TestSend_LongText(t *testing.T) {
 	f := newFakeServer(t, "tok4")
 	c := newClient(t, "tok4", nil, false, f)
@@ -227,10 +221,8 @@ func TestAskApproval_Approve(t *testing.T) {
 	c := newClient(t, "tok5", []int64{requester}, false, f)
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
-	// Start listen loop so callbacks are processed
 	_, _ = c.Listen(ctx)
 
-	// inject callback after a short delay
 	go func() {
 		time.Sleep(50 * time.Millisecond)
 		f.callbackChan <- callbackInject{reqID: "req-1", approved: true, from: requester}
@@ -350,7 +342,6 @@ func TestExpiredCallbackWithoutMessageIsAcknowledged(t *testing.T) {
 	}
 }
 
-// T8: client retry on HTTP 500.
 func TestListen_RetryOn500(t *testing.T) {
 	var calls atomic.Int32
 	mux := http.NewServeMux()
@@ -392,7 +383,6 @@ func TestListen_RetryOn500(t *testing.T) {
 	}
 }
 
-// T9: client abort on 401.
 func TestListen_AbortOn401(t *testing.T) {
 	mux := http.NewServeMux()
 	token := "tok9"

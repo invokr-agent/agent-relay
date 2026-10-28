@@ -130,7 +130,6 @@ func (c *Client) readLoop(ctx context.Context, out chan<- relay.Inbound) {
 	}
 }
 
-// dropConn closes conn and clears it if it's still the active connection.
 func (c *Client) dropConn(conn net.Conn) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -142,8 +141,6 @@ func (c *Client) dropConn(conn net.Conn) {
 	}
 }
 
-// waitReconnect backs off then attempts a reconnect, resetting backoff on success.
-// It returns false if ctx was cancelled during the wait.
 func (c *Client) waitReconnect(ctx context.Context, backoff *time.Duration) bool {
 	if !kit.WaitBackoff(ctx, backoff, maxBackoff) {
 		return false
@@ -172,7 +169,6 @@ func (c *Client) readConn(ctx context.Context, scanner *bufio.Scanner, buffered 
 	return io.EOF
 }
 
-// rpcMessage is a JSON-RPC notification (no ID) or response.
 type rpcMessage struct {
 	ID     *int64          `json:"id"`
 	Method string          `json:"method"`
@@ -224,7 +220,6 @@ func (c *Client) message(p signalParams) (source, text string, ok bool) {
 	return source, strings.TrimSpace(m.Message), true
 }
 
-// withAccount adds the account to params for a multi-account daemon.
 func (c *Client) withAccount(params map[string]any) map[string]any {
 	if c.account != "" {
 		params["account"] = c.account

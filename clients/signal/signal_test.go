@@ -25,7 +25,6 @@ func pipeDialer() (func(string, string) (net.Conn, error), net.Conn) {
 	return dialer, server
 }
 
-// writeNotification writes a JSON-RPC receive notification to the server side.
 func writeNotification(conn net.Conn, source, message string) {
 	notif := map[string]any{
 		"jsonrpc": "2.0",
@@ -50,7 +49,7 @@ func writeRPCResponse(conn net.Conn, id float64) {
 
 func consumeSubscribe(conn net.Conn) {
 	scanner := bufio.NewScanner(conn)
-	scanner.Scan() // read subscribeReceive
+	scanner.Scan()
 	ack := `{"jsonrpc":"2.0","id":1,"result":{}}` + "\n"
 	_, _ = conn.Write([]byte(ack))
 }
@@ -151,7 +150,6 @@ func TestListen_AllowedNumber(t *testing.T) {
 	}
 }
 
-// S3: inbound from blocked number — nothing on channel.
 func TestListen_BlockedNumber(t *testing.T) {
 	c, server := newTestClient(t, []string{"+1allowed"})
 	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
@@ -164,11 +162,9 @@ func TestListen_BlockedNumber(t *testing.T) {
 			t.Fatalf("expected nothing, got %+v", msg)
 		}
 	case <-ctx.Done():
-		// correct
 	}
 }
 
-// S3b: empty allowlist denies everyone (fail closed).
 func TestListen_EmptyAllowlistDenies(t *testing.T) {
 	c, server := newTestClient(t, nil)
 	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
@@ -181,7 +177,6 @@ func TestListen_EmptyAllowlistDenies(t *testing.T) {
 			t.Fatalf("expected nothing with empty allowlist, got %+v", msg)
 		}
 	case <-ctx.Done():
-		// correct
 	}
 }
 
@@ -212,7 +207,6 @@ func TestDialChecksPeer(t *testing.T) {
 	}
 }
 
-// S4: Send method — correct JSON-RPC call with recipient array.
 func TestSend_RPCCall(t *testing.T) {
 	c, server := newTestClient(t, nil)
 	defer func() { _ = server.Close() }()
@@ -416,7 +410,6 @@ func TestAskApproval_Cancel(t *testing.T) {
 	}
 }
 
-// S9: Long message chunked at 2000 runes.
 func TestSend_LongMessage(t *testing.T) {
 	c, server := newTestClient(t, nil)
 	defer func() { _ = server.Close() }()
@@ -516,9 +509,9 @@ func TestListen_ReconnectsAfterCleanEOF(t *testing.T) {
 	ch, _ := c.Listen(ctx)
 
 	go func() {
-		_ = server1.Close() // clean EOF on first conn
+		_ = server1.Close()
 		scanner := bufio.NewScanner(server2)
-		if !scanner.Scan() { // read resubscribe, ack with its real id
+		if !scanner.Scan() {
 			return
 		}
 		var msg map[string]any

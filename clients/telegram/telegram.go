@@ -34,7 +34,7 @@ type Client struct {
 	allowedIDs     map[int64]bool
 	allowGroups    bool
 	httpClient     *http.Client
-	pending        sync.Map // map[string]*kit.PendingApproval — approval callbacks
+	pending        sync.Map
 }
 
 // New constructs a Client admitting messages from allowedUserIDs, in private

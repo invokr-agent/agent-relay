@@ -29,12 +29,10 @@ type Bridge struct {
 	Store   *Store
 	Clients []Client
 	Logger  *slog.Logger
-	// Cwd is the working directory the agent's sessions are opened in.
-	Cwd string
+	Cwd     string
 	// RateLimit caps the messages a chat may send per minute; 0 means 20.
 	RateLimit int
-	// Audit, when set, records each approval decision.
-	Audit *slog.Logger
+	Audit     *slog.Logger
 
 	conn      *acp.ClientConn
 	canLoad   bool
@@ -62,7 +60,6 @@ func (c *chat) current() acp.SessionID {
 	return c.session
 }
 
-// set runs f under the chat's lock.
 func (c *chat) set(f func()) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -240,8 +237,6 @@ func (b *Bridge) handle(ctx context.Context, c *chat, text string) error {
 	return b.sendReply(ctx, c, resp.StopReason)
 }
 
-// openSession resumes the chat's stored session when the agent can load it,
-// and otherwise starts a fresh one.
 func (b *Bridge) openSession(ctx context.Context, c *chat) error {
 	stored := b.Store.SessionID(c.key)
 	if stored == "" || !b.canLoad {
@@ -269,8 +264,6 @@ func (b *Bridge) newSession(ctx context.Context, c *chat) error {
 	return b.Store.SetSessionID(c.key, string(resp.SessionID))
 }
 
-// sendReply posts the turn's streamed answer as one message (chunked to the
-// client's limit), noting a turn that did not end normally.
 func (b *Bridge) sendReply(ctx context.Context, c *chat, stop acp.StopReason) error {
 	c.mu.Lock()
 	reply := strings.TrimSpace(c.reply.String())
@@ -367,7 +360,6 @@ func (b *Bridge) audit(c *chat, approver, tool string, approved, timedOut bool) 
 	b.Audit.Info("approval", "chat", c.key, "approver", approver, "tool", tool, "decision", decision)
 }
 
-// typing keeps the client's typing indicator on, when it has one, until stop.
 func (b *Bridge) typing(ctx context.Context, c *chat) (stop func()) {
 	typer, ok := c.t.(Typer)
 	if !ok {
