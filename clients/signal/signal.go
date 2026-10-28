@@ -48,6 +48,7 @@ type Client struct {
 	pending        sync.Map // map[request ID]*kit.PendingApproval
 	pendingRPC     sync.Map // map[int64]chan rpcMessage
 	dialer         func(network, address string) (net.Conn, error)
+	connDone       chan struct{} // closed when a DialRPC connection ends
 }
 
 // New dials the UNIX socket and sends subscribeReceive. Only allowedNumbers
@@ -99,6 +100,40 @@ func newWithDialer(socketPath, account string, allowedNumbers []string, dialer f
 	}
 	return c, nil
 }
+
+// DialRPC connects for one-off JSON-RPC calls, without subscribing to
+// messages. The connection ends with ctx or Close.
+func DialRPC(ctx context.Context, socketPath string) (*Client, error) {
+	conn, err := Dial("unix", socketPath)
+	if err != nil {
+		return nil, fmt.Errorf("signal: dial %s: %w", socketPath, err)
+	}
+	c := &Client{socketPath: socketPath, conn: conn, connDone: make(chan struct{})}
+	stop := context.AfterFunc(ctx, func() { _ = conn.Close() })
+	go func() {
+		defer close(c.connDone)
+		defer stop()
+		scanner := bufio.NewScanner(conn)
+		scanner.Buffer(nil, maxLine)
+		for scanner.Scan() {
+			c.dispatchLine(ctx, scanner.Bytes(), nil)
+		}
+	}()
+	return c, nil
+}
+
+// Call sends one request and decodes its result into result. Unlike the
+// relay's own calls it has no timeout beyond ctx.
+func (c *Client) Call(ctx context.Context, method string, params map[string]any, result any) error {
+	raw, err := c.call(ctx, method, params)
+	if err != nil {
+		return err
+	}
+	return json.Unmarshal(raw, result)
+}
+
+// Close ends the connection.
+func (c *Client) Close() error { return c.conn.Close() }
 
 func (c *Client) Name() string { return "signal" }
 
@@ -354,14 +389,18 @@ func rpcFrame(id int64, method string, params any) ([]byte, error) {
 }
 
 func (c *Client) rpc(ctx context.Context, method string, params map[string]any) (json.RawMessage, error) {
+	ctx, cancel := context.WithTimeout(ctx, rpcTimeout)
+	defer cancel()
+	return c.call(ctx, method, params)
+}
+
+func (c *Client) call(ctx context.Context, method string, params map[string]any) (json.RawMessage, error) {
 	id := c.nextID.Add(1)
 	raw, err := rpcFrame(id, method, c.withAccount(params))
 	if err != nil {
 		return nil, err
 	}
 
-	ctx, cancel := context.WithTimeout(ctx, rpcTimeout)
-	defer cancel()
 	ch := make(chan rpcMessage, 1)
 	c.pendingRPC.Store(id, ch)
 	defer c.pendingRPC.Delete(id)
@@ -381,6 +420,8 @@ func (c *Client) rpc(ctx context.Context, method string, params map[string]any) 
 			return nil, fmt.Errorf("signal: %w", res.Error)
 		}
 		return res.Result, nil
+	case <-c.connDone:
+		return nil, fmt.Errorf("signal: rpc %s: connection closed", method)
 	case <-ctx.Done():
 		return nil, fmt.Errorf("signal: rpc %s: %w", method, ctx.Err())
 	}

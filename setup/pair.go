@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	signalcli "github.com/invokr-agent/agent-relay/clients/signal"
 	"github.com/invokr-agent/agent-relay/clients/telegram"
 	"github.com/invokr-agent/agent-relay/internal/config"
 	"github.com/invokr-agent/agent-relay/internal/secrets"
@@ -149,24 +150,24 @@ func matchCode(u telegram.Update, code string, issued int64, attempts map[int64]
 // relay's account and its only allowed number: the owner talks to the relay
 // through Note to Self.
 func pairSignal(ctx context.Context, s *config.Signal, emit func(Event)) error {
-	c, err := dialSignal(ctx, s.Socket)
+	c, err := signalcli.DialRPC(ctx, s.Socket)
 	if err != nil {
-		return err
+		return fmt.Errorf("setup: %w", err)
 	}
-	defer c.close()
+	defer func() { _ = c.Close() }()
 	var link struct {
 		URI string `json:"deviceLinkUri"`
 	}
-	if err := c.call("startLink", map[string]any{}, &link); err != nil {
-		return err
+	if err := c.Call(ctx, "startLink", map[string]any{}, &link); err != nil {
+		return fmt.Errorf("setup: %w", err)
 	}
 	emit(Event{Event: "qr", URI: link.URI})
 	emit(Event{Event: "waiting"})
 	var linked struct {
 		Number string `json:"number"`
 	}
-	if err := c.call("finishLink", map[string]any{"deviceLinkUri": link.URI, "deviceName": "agent-relay"}, &linked); err != nil {
-		return err
+	if err := c.Call(ctx, "finishLink", map[string]any{"deviceLinkUri": link.URI, "deviceName": "agent-relay"}, &linked); err != nil {
+		return fmt.Errorf("setup: %w", err)
 	}
 	if linked.Number == "" {
 		return errors.New("setup: signal finishLink returned no number")
