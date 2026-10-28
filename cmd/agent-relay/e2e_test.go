@@ -110,9 +110,11 @@ func (b *lockedBuffer) String() string {
 }
 
 func (r *relayProc) cmd(stdin string, args ...string) *exec.Cmd {
-	c := exec.Command(os.Args[0], args...)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	r.t.Cleanup(cancel)
+	c := exec.CommandContext(ctx, os.Args[0], args...)
 	c.Env, c.Stdin = r.env, strings.NewReader(stdin)
-	c.Stderr = &r.output
+	c.Stderr, c.WaitDelay = &r.output, 5*time.Second
 	return c
 }
 

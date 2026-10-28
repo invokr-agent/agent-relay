@@ -59,7 +59,10 @@ func Pair(ctx context.Context, path, client string, emit func(Event)) error {
 	}
 	switch {
 	case client == "telegram" && cfg.Telegram != nil:
-		err = pairTelegram(ctx, cfg.Telegram, cfg.TelegramAPI(), filepath.Dir(path), emit)
+		var api string
+		if api, err = cfg.TelegramAPI(); err == nil {
+			err = pairTelegram(ctx, cfg.Telegram, api, filepath.Dir(path), emit)
+		}
 	case client == "signal" && cfg.Signal != nil:
 		err = pairSignal(ctx, cfg.Signal, emit)
 	default:

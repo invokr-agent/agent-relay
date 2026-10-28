@@ -45,6 +45,7 @@ agent-relay   # reads $XDG_CONFIG_HOME/agent-relay/config.json
 ```
 
 - **Config:** written 0600 in a 0700 directory. `version` is the schema; changes are additive. A version 0 file (`token`, `allowed_chat_ids`) is migrated on start: the token moves to the secret store, private chat IDs become user IDs.
+- **Test hook:** `telegram.base_url` (or `AGENT_RELAY_TELEGRAM_BASE_URL`) points the relay at a fake Bot API such as `telegramtest`; only `127.0.0.1` and `::1` are accepted.
 - **Secrets:** the Telegram token is kept in the OS keyring, or `secrets.json` (0600) beside the config when no keyring is reachable. `AGENT_RELAY_TELEGRAM_TOKEN` overrides both.
 - **Access:** Telegram admits the listed user IDs in private chats only, unless `allow_groups`; Signal admits the listed numbers. An empty list admits nobody. With `allow_groups`, every allow-listed member of a group shares one session and its agent, so trust them alike. Telegram is not end-to-end encrypted: prefer Signal for sensitive work.
 - **Approvals:** only the user whose message started the turn can answer; an unanswered prompt denies. Every decision is appended to `audit_log` (default `audit.log` beside the config).

@@ -142,11 +142,11 @@ type params struct {
 
 func (s *Server) serve(w http.ResponseWriter, r *http.Request) {
 	method, ok := strings.CutPrefix(r.URL.Path, "/bot"+s.token+"/")
-	var p params
 	if !ok {
 		reply(w, http.StatusUnauthorized, nil)
 		return
 	}
+	var p params
 	if json.NewDecoder(r.Body).Decode(&p) != nil {
 		reply(w, http.StatusBadRequest, nil)
 		return
