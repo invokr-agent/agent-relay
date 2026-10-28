@@ -1,18 +1,18 @@
-// Command messaging-kit bridges Telegram and Signal chats to an ACP agent.
+// Command agent-relay bridges Telegram and Signal chats to an ACP agent.
 //
-//	messaging-kit -config messaging-kit.json
+//	agent-relay -config agent-relay.json
 //
 // The config names the agent command to spawn and the transports to serve:
 //
 //	{
 //	  "agent": ["invokr", "acp"],
 //	  "cwd": "/home/me/project",
-//	  "store": "/home/me/.local/state/messaging-kit/sessions.json",
+//	  "store": "/home/me/.local/state/agent-relay/sessions.json",
 //	  "telegram": {"token": "...", "allowed_chat_ids": [123456789]},
 //	  "signal": {"socket": "/var/run/signal-cli/socket", "allowed_numbers": ["+15551234567"]}
 //	}
 //
-// MESSAGING_KIT_TELEGRAM_TOKEN overrides the token so it can stay out of the file.
+// AGENT_RELAY_TELEGRAM_TOKEN overrides the token so it can stay out of the file.
 package main
 
 import (
@@ -28,9 +28,9 @@ import (
 	"os/signal"
 	"syscall"
 
-	messaging "github.com/invokr-agent/messaging-kit"
-	signalcli "github.com/invokr-agent/messaging-kit/signal"
-	"github.com/invokr-agent/messaging-kit/telegram"
+	messaging "github.com/invokr-agent/agent-relay"
+	signalcli "github.com/invokr-agent/agent-relay/signal"
+	"github.com/invokr-agent/agent-relay/telegram"
 )
 
 type config struct {
@@ -50,11 +50,11 @@ type config struct {
 }
 
 func main() {
-	path := flag.String("config", "messaging-kit.json", "config file")
+	path := flag.String("config", "agent-relay.json", "config file")
 	flag.Parse()
 	logger := slog.New(slog.NewTextHandler(os.Stderr, nil))
 	if err := run(*path, logger); err != nil {
-		logger.Error("messaging-kit stopped", "err", err)
+		logger.Error("agent-relay stopped", "err", err)
 		os.Exit(1)
 	}
 }
@@ -92,7 +92,7 @@ func load(path string) (config, error) {
 	if len(cfg.Agent) == 0 {
 		return cfg, errors.New(`config: "agent" names the ACP agent command, e.g. ["invokr", "acp"]`)
 	}
-	cfg.Telegram.Token = cmp.Or(os.Getenv("MESSAGING_KIT_TELEGRAM_TOKEN"), cfg.Telegram.Token)
+	cfg.Telegram.Token = cmp.Or(os.Getenv("AGENT_RELAY_TELEGRAM_TOKEN"), cfg.Telegram.Token)
 	if cfg.Cwd == "" {
 		cfg.Cwd, _ = os.Getwd()
 	}
@@ -101,7 +101,7 @@ func load(path string) (config, error) {
 		if err != nil {
 			return cfg, err
 		}
-		cfg.Store = state + "/messaging-kit/sessions.json"
+		cfg.Store = state + "/agent-relay/sessions.json"
 	}
 	return cfg, nil
 }

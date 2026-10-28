@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/invokr-agent/messaging-kit"
+	"github.com/invokr-agent/agent-relay"
 )
 
 type fakeTelegramServer struct {

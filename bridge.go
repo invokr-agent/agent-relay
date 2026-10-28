@@ -72,7 +72,7 @@ func (b *Bridge) Run(ctx context.Context, agent *exec.Cmd) error {
 	defer func() { _ = conn.Close() }()
 	b.conn = conn
 	init, err := conn.Initialize(ctx, acp.InitializeRequest{ProtocolVersion: acp.V1,
-		ClientInfo: &acp.Implementation{Name: "messaging-kit", Version: "0.1.0"}})
+		ClientInfo: &acp.Implementation{Name: "agent-relay", Version: "0.1.0"}})
 	if err != nil {
 		return fmt.Errorf("messaging: initialize agent: %w", err)
 	}

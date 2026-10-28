@@ -18,7 +18,7 @@ import (
 // The bridge tests run a fake ACP agent as a real subprocess (this test binary,
 // re-executed) and chat with it through a fake transport.
 
-const fakeAgentEnv = "MESSAGING_KIT_FAKE_AGENT"
+const fakeAgentEnv = "AGENT_RELAY_FAKE_AGENT"
 
 func TestMain(m *testing.M) {
 	if os.Getenv(fakeAgentEnv) == "1" {

@@ -12,7 +12,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/invokr-agent/messaging-kit"
+	"github.com/invokr-agent/agent-relay"
 )
 
 const (

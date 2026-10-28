@@ -1,4 +1,4 @@
-module github.com/invokr-agent/messaging-kit
+module github.com/invokr-agent/agent-relay
 
 go 1.26.3
 

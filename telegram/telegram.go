@@ -11,7 +11,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/invokr-agent/messaging-kit"
+	"github.com/invokr-agent/agent-relay"
 )
 
 const (

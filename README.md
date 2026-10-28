@@ -1,6 +1,6 @@
-# messaging-kit
+# agent-relay
 
-Chat with a coding agent from Telegram or Signal. messaging-kit is an [ACP](https://agentclientprotocol.com) client: it spawns any ACP agent, such as `invokr acp` or another agent with ACP support, and bridges your chats to it.
+Chat with a coding agent from Telegram or Signal. agent-relay is an [ACP](https://agentclientprotocol.com) client: it spawns any ACP agent, such as `invokr acp` or another agent with ACP support, and bridges your chats to it.
 
 - **Sessions:** each chat has its own agent session. It is kept across restarts and resumed with `session/load` when the agent supports it; replayed history is not posted again.
 - **Turns:** a chat's messages run one turn at a time. The streamed answer is posted as one message, split to the platform's size limit.
@@ -13,8 +13,8 @@ Chat with a coding agent from Telegram or Signal. messaging-kit is an [ACP](http
 ## Run
 
 ```
-go install github.com/invokr-agent/messaging-kit/cmd/messaging-kit@latest
-messaging-kit -config messaging-kit.json
+go install github.com/invokr-agent/agent-relay/cmd/agent-relay@latest
+agent-relay -config agent-relay.json
 ```
 
 ```json
@@ -26,9 +26,9 @@ messaging-kit -config messaging-kit.json
 }
 ```
 
-- **Telegram token:** `MESSAGING_KIT_TELEGRAM_TOKEN` overrides it, so the token can stay out of the file.
+- **Telegram token:** `AGENT_RELAY_TELEGRAM_TOKEN` overrides it, so the token can stay out of the file.
 - **Access:** a transport refuses to start without an allowlist, unless `allow_all` is set explicitly. Chats not on the allowlist get "Access denied."
-- **Session map:** saved to `store`, which defaults to `<user config dir>/messaging-kit/sessions.json`.
+- **Session map:** saved to `store`, which defaults to `<user config dir>/agent-relay/sessions.json`.
 - **Signal:** needs [signal-cli](https://github.com/AsamK/signal-cli) running in JSON-RPC mode on that socket.
 
 ## Develop
