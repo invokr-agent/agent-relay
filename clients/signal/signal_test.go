@@ -143,7 +143,7 @@ func TestListen_AllowedNumber(t *testing.T) {
 	go writeNotification(server, "+12025551234", "hello signal")
 	select {
 	case msg := <-ch:
-		if msg.ChatID != "+12025551234" || msg.Text != "hello signal" {
+		if msg.ChatID != "+12025551234" || msg.SenderID != "+12025551234" || msg.Text != "hello signal" {
 			t.Fatalf("unexpected: %+v", msg)
 		}
 	case <-ctx.Done():
@@ -185,7 +185,7 @@ func TestListen_EmptyAllowlistDenies(t *testing.T) {
 	}
 }
 
-func TestCheckSocket(t *testing.T) {
+func TestDialChecksPeer(t *testing.T) {
 	dir, err := os.MkdirTemp("", "sock")
 	if err != nil {
 		t.Fatal(err)
@@ -197,14 +197,18 @@ func TestCheckSocket(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer func() { _ = l.Close() }()
-	if err := CheckSocket(path); err != nil {
+	conn, err := Dial("unix", path)
+	if err != nil {
 		t.Fatalf("own socket refused: %v", err)
 	}
-	if err := os.WriteFile(path+".file", nil, 0o600); err != nil {
+	_ = conn.Close()
+	tcp, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
 		t.Fatal(err)
 	}
-	if CheckSocket(path+".file") == nil {
-		t.Fatal("regular file accepted as socket")
+	defer func() { _ = tcp.Close() }()
+	if _, err := Dial("tcp", tcp.Addr().String()); err == nil {
+		t.Fatal("non-Unix peer accepted")
 	}
 }
 

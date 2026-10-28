@@ -24,7 +24,7 @@ func TestLoadMovesLegacyToken(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if v, _ := secrets.Get(secrets.TelegramToken); v != "tok" {
+	if v, _ := secrets.Get(dir, secrets.TelegramToken); v != "tok" {
 		t.Fatalf("token = %q", v)
 	}
 	data, _ := os.ReadFile(path)
@@ -33,5 +33,23 @@ func TestLoadMovesLegacyToken(t *testing.T) {
 	}
 	if cfg.AuditLog != filepath.Join(dir, "audit.log") {
 		t.Fatalf("audit = %q", cfg.AuditLog)
+	}
+}
+
+func TestRunRefusesSymlinkedAuditLog(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+	target := filepath.Join(dir, "elsewhere")
+	if err := os.Symlink(target, filepath.Join(dir, "audit.log")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(`{"version":1,"agent":["true"]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := run(path, nil); err == nil {
+		t.Fatal("run followed the audit symlink")
+	}
+	if _, err := os.Stat(target); !os.IsNotExist(err) {
+		t.Fatal("symlink target created")
 	}
 }

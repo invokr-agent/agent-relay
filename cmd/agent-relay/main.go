@@ -72,7 +72,7 @@ func run(path string, logger *slog.Logger) error {
 	if err != nil {
 		return err
 	}
-	clients, err := buildClients(cfg)
+	clients, err := buildClients(cfg, filepath.Dir(path))
 	if err != nil {
 		return err
 	}
@@ -80,16 +80,20 @@ func run(path string, logger *slog.Logger) error {
 	if err != nil {
 		return err
 	}
-	audit, err := os.OpenFile(cfg.AuditLog, os.O_WRONLY|os.O_APPEND|os.O_CREATE, 0o600)
+	// O_NOFOLLOW: a planted symlink must not redirect the audit log.
+	audit, err := os.OpenFile(cfg.AuditLog, os.O_WRONLY|os.O_APPEND|os.O_CREATE|syscall.O_NOFOLLOW, 0o600)
 	if err != nil {
 		return err
 	}
 	defer func() { _ = audit.Close() }()
+	if err := audit.Chmod(0o600); err != nil {
+		return err
+	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	agent := exec.CommandContext(ctx, cfg.Agent[0], cfg.Agent[1:]...)
 	agent.Stderr = os.Stderr
-	bridge := &relay.Bridge{Store: store, Clients: clients, Logger: logger, Cwd: cfg.Cwd, RateLimit: cfg.RateLimit, Audit: audit}
+	bridge := &relay.Bridge{Store: store, Clients: clients, Logger: logger, Cwd: cfg.Cwd, RateLimit: cfg.RateLimit, Audit: slog.New(slog.NewJSONHandler(audit, nil))}
 	return bridge.Run(ctx, agent)
 }
 
@@ -104,7 +108,7 @@ func load(path string) (config.Config, error) {
 		return cfg, errors.New(`config: "agent" names the ACP agent argv, e.g. ["invokr", "acp"]`)
 	}
 	if t := cfg.Telegram; t != nil && t.LegacyToken != "" {
-		if _, err := secrets.Set(secrets.TelegramToken, t.LegacyToken); err != nil {
+		if _, err := secrets.Set(filepath.Dir(path), secrets.TelegramToken, t.LegacyToken); err != nil {
 			return cfg, err
 		}
 		t.LegacyToken = ""
@@ -127,10 +131,10 @@ func load(path string) (config.Config, error) {
 
 // buildClients starts each configured client. An empty allow-list admits
 // nobody: clients fail closed.
-func buildClients(cfg config.Config) ([]relay.Client, error) {
+func buildClients(cfg config.Config, dir string) ([]relay.Client, error) {
 	var out []relay.Client
 	if t := cfg.Telegram; t != nil {
-		token, err := secrets.Get(secrets.TelegramToken)
+		token, err := secrets.Get(dir, secrets.TelegramToken)
 		if err != nil {
 			return nil, fmt.Errorf("telegram token: %w (run agent-relay setup)", err)
 		}

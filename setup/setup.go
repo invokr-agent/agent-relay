@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"path/filepath"
 	"regexp"
 	"slices"
 	"strconv"
@@ -116,7 +117,7 @@ func Apply(ctx context.Context, path, client string, a Answers) error {
 		cfg.Agent = argv
 	}
 	if client == "telegram" {
-		err = applyTelegram(&cfg, a)
+		err = applyTelegram(&cfg, filepath.Dir(path), a)
 	} else {
 		applySignal(&cfg, a)
 	}
@@ -126,7 +127,7 @@ func Apply(ctx context.Context, path, client string, a Answers) error {
 	return config.Save(path, cfg)
 }
 
-func applyTelegram(cfg *config.Config, a Answers) error {
+func applyTelegram(cfg *config.Config, dir string, a Answers) error {
 	if cfg.Telegram == nil {
 		cfg.Telegram = &config.Telegram{}
 	}
@@ -137,7 +138,7 @@ func applyTelegram(cfg *config.Config, a Answers) error {
 		}
 		cfg.Telegram.AllowedUserIDs = appendNew(cfg.Telegram.AllowedUserIDs, id)
 	}
-	_, err := secrets.Set(secrets.TelegramToken, strings.TrimSpace(a["token"]))
+	_, err := secrets.Set(dir, secrets.TelegramToken, strings.TrimSpace(a["token"]))
 	return err
 }
 

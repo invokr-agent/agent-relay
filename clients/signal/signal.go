@@ -12,7 +12,6 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
-	"syscall"
 	"time"
 
 	"github.com/invokr-agent/agent-relay"
@@ -51,28 +50,31 @@ type Client struct {
 }
 
 // New dials the UNIX socket and sends subscribeReceive. Only allowedNumbers
-// are served; an empty list admits nobody. Returns an error if the path is not
-// a socket owned by this user, is unreachable, or the ack is not received
-// within 5 seconds.
+// are served; an empty list admits nobody. Returns an error if the socket's
+// peer is not this user, is unreachable, or the ack is not received within
+// 5 seconds.
 func New(socketPath string, allowedNumbers []string) (*Client, error) {
-	if err := CheckSocket(socketPath); err != nil {
-		return nil, err
-	}
-	return newWithDialer(socketPath, allowedNumbers, (&net.Dialer{Timeout: dialTimeout}).Dial)
+	return newWithDialer(socketPath, allowedNumbers, Dial)
 }
 
-// CheckSocket refuses a path that is not a Unix socket owned by the current
-// user: another user's socket could impersonate signal-cli.
-func CheckSocket(path string) error {
-	fi, err := os.Lstat(path)
+// Dial connects to signal-cli's socket and refuses a peer running as another
+// user, which could impersonate signal-cli. The check is on the connected
+// peer, not the path, so swapping the socket file cannot race it.
+func Dial(network, path string) (net.Conn, error) {
+	conn, err := (&net.Dialer{Timeout: dialTimeout}).Dial(network, path)
 	if err != nil {
-		return fmt.Errorf("signal: %w", err)
+		return nil, err
 	}
-	st, ok := fi.Sys().(*syscall.Stat_t)
-	if fi.Mode()&os.ModeSocket == 0 || !ok || int(st.Uid) != os.Getuid() {
-		return fmt.Errorf("signal: %s is not a Unix socket owned by this user", path)
+	uc, ok := conn.(*net.UnixConn)
+	uid := -1
+	if ok {
+		uid, err = peerUID(uc)
 	}
-	return nil
+	if err != nil || uid != os.Getuid() {
+		_ = conn.Close()
+		return nil, fmt.Errorf("signal: %s is not served by this user", path)
+	}
+	return conn, nil
 }
 
 func newWithDialer(socketPath string, allowedNumbers []string, dialer func(string, string) (net.Conn, error)) (*Client, error) {
@@ -237,7 +239,7 @@ func (c *Client) dispatchLine(ctx context.Context, line []byte, out chan<- relay
 		return
 	}
 	select {
-	case out <- relay.Inbound{ChatID: source, Sender: source, Text: text}:
+	case out <- relay.Inbound{ChatID: source, Sender: source, SenderID: source, Text: text}:
 	case <-ctx.Done():
 	}
 }

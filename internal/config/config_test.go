@@ -54,3 +54,40 @@ func TestDirHonorsXDG(t *testing.T) {
 		t.Fatal(Path())
 	}
 }
+
+func TestReadFileRefusesUnsafeFiles(t *testing.T) {
+	dir := t.TempDir()
+	real := filepath.Join(dir, "real.json")
+	if err := os.WriteFile(real, []byte(`{}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(dir, "link.json")
+	if err := os.Symlink(real, link); err != nil {
+		t.Fatal(err)
+	}
+	open := filepath.Join(dir, "open.json")
+	if err := os.WriteFile(open, []byte(`{}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(open, 0o666); err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range []string{link, open} {
+		if _, err := Load(p); err == nil {
+			t.Errorf("%s loaded", p)
+		}
+	}
+}
+
+func TestWriteFileTightensDir(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "d")
+	if err := os.Mkdir(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := WriteFile(filepath.Join(dir, "f"), nil); err != nil {
+		t.Fatal(err)
+	}
+	if fi, _ := os.Stat(dir); fi.Mode().Perm() != 0o700 {
+		t.Fatalf("dir mode %v", fi.Mode())
+	}
+}

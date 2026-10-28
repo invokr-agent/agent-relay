@@ -79,7 +79,7 @@ func TestApplyTelegram(t *testing.T) {
 	if data, _ := os.ReadFile(path); strings.Contains(string(data), token) {
 		t.Fatal("token written to the config")
 	}
-	if v, _ := secrets.Get(secrets.TelegramToken); v != token {
+	if v, _ := secrets.Get(config.Dir(), secrets.TelegramToken); v != token {
 		t.Fatal("token not stored")
 	}
 	if Apply(context.Background(), path, "telegram", Answers{"token": "9" + token}) == nil {

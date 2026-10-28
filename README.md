@@ -62,6 +62,8 @@ cosign verify-blob checksums.txt --bundle checksums.txt.sigstore.json \
 sha256sum --ignore-missing -c checksums.txt
 ```
 
+Substitute the release tag for `vX.Y.Z`.
+
 ## Develop
 
 `make test` runs the race-enabled tests. The bridge tests run a fake ACP agent as a real subprocess and chat with it through a fake transport.

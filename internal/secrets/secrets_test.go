@@ -10,32 +10,53 @@ import (
 
 func TestKeyringThenEnv(t *testing.T) {
 	keyring.MockInit()
-	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
-	if _, err := Get("x"); !errors.Is(err, ErrNotFound) {
+	dir := t.TempDir()
+	if _, err := Get(dir, "x"); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("unset secret: %v", err)
 	}
-	if in, err := Set("x", "kr"); !in || err != nil {
+	if in, err := Set(dir, "x", "kr"); !in || err != nil {
 		t.Fatalf("Set = %v, %v", in, err)
 	}
-	if v, _ := Get("x"); v != "kr" {
+	if v, _ := Get(dir, "x"); v != "kr" {
 		t.Fatalf("Get = %q", v)
 	}
 	t.Setenv("AGENT_RELAY_X", "env")
-	if v, _ := Get("x"); v != "env" {
+	if v, _ := Get(dir, "x"); v != "env" {
 		t.Fatalf("env override = %q", v)
 	}
 }
 
 func TestFileFallback(t *testing.T) {
 	keyring.MockInitWithError(errors.New("no keyring"))
-	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
-	if in, err := Set("x", "file"); in || err != nil {
+	dir := t.TempDir()
+	if in, err := Set(dir, "x", "file"); in || err != nil {
 		t.Fatalf("Set = %v, %v", in, err)
 	}
-	if v, _ := Get("x"); v != "file" {
+	if v, _ := Get(dir, "x"); v != "file" {
 		t.Fatalf("Get = %q", v)
 	}
-	if fi, err := os.Stat(file()); err != nil || fi.Mode() != 0o600 {
+	if fi, err := os.Stat(file(dir)); err != nil || fi.Mode() != 0o600 {
 		t.Fatalf("secrets file: %v %v", fi, err)
+	}
+}
+
+func TestKeyringErrorSurfaces(t *testing.T) {
+	keyring.MockInitWithError(errors.New("locked"))
+	if _, err := Get(t.TempDir(), "x"); err == nil || errors.Is(err, ErrNotFound) {
+		t.Fatalf("keyring failure hidden: %v", err)
+	}
+}
+
+func TestSymlinkedFileRefused(t *testing.T) {
+	keyring.MockInit()
+	dir := t.TempDir()
+	if err := os.WriteFile(dir+"/real", []byte(`{"x":"v"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(dir+"/real", file(dir)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Get(dir, "x"); err == nil {
+		t.Fatal("symlinked secrets file read")
 	}
 }

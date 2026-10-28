@@ -186,7 +186,7 @@ func TestBridgeApprovalTimeoutDenies(t *testing.T) {
 	chat := newFakeClient(true)
 	chat.timeout = true
 	var audit syncBuffer
-	startBridge(t, filepath.Join(t.TempDir(), "sessions.json"), chat, func(b *Bridge) { b.Audit = &audit })
+	startBridge(t, filepath.Join(t.TempDir(), "sessions.json"), chat, func(b *Bridge) { b.Audit = slog.New(slog.NewJSONHandler(&audit, nil)) })
 	chat.say("run")
 	<-chat.asked
 	if got := chat.next(t); got != "approval timed out; denied" {
@@ -232,6 +232,20 @@ func TestBridgeRateLimit(t *testing.T) {
 	c.window = c.window.Add(-rateWindow)
 	if !b.admit(c) {
 		t.Fatal("new window not admitted")
+	}
+}
+
+// /cancel still reaches the agent when the chat is over its rate limit.
+func TestBridgeCancelBypassesRateLimit(t *testing.T) {
+	chat := newFakeClient(true)
+	startBridge(t, filepath.Join(t.TempDir(), "sessions.json"), chat, func(b *Bridge) { b.RateLimit = 2 })
+	chat.say("hi")
+	chat.next(t)
+	chat.say("wait")
+	time.Sleep(100 * time.Millisecond)
+	chat.say("/cancel")
+	if got := chat.next(t); got != "⏹ stopped" {
+		t.Fatalf("cancel under rate limit sent %q", got)
 	}
 }
 

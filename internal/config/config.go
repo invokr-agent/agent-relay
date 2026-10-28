@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"syscall"
 )
 
 // Version is the schema version Save writes.
@@ -59,7 +60,7 @@ func Path() string { return filepath.Join(Dir(), "config.json") }
 // to move into the secret store.
 func Load(path string) (Config, error) {
 	cfg := Config{Version: Version}
-	data, err := os.ReadFile(path)
+	data, err := ReadFile(path)
 	if errors.Is(err, os.ErrNotExist) {
 		return cfg, nil
 	}
@@ -95,9 +96,29 @@ func Save(path string, cfg Config) error {
 	return WriteFile(path, append(data, '\n'))
 }
 
+// ReadFile reads path only if it is a regular file (not a symlink) owned by
+// this user and not writable by others: the config names the argv agent-relay
+// runs, and the secrets file holds credentials.
+func ReadFile(path string) ([]byte, error) {
+	fi, err := os.Lstat(path)
+	if err != nil {
+		return nil, err
+	}
+	st, ok := fi.Sys().(*syscall.Stat_t)
+	if !fi.Mode().IsRegular() || !ok || int(st.Uid) != os.Getuid() || fi.Mode().Perm()&0o022 != 0 {
+		return nil, fmt.Errorf("%s must be a regular file owned by you and not group/world-writable", path)
+	}
+	return os.ReadFile(path)
+}
+
 // WriteFile replaces path atomically with a 0600 file in a 0700 directory.
 func WriteFile(path string, data []byte) error {
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return err
+	}
+	// MkdirAll leaves an existing directory's mode alone.
+	if err := os.Chmod(dir, 0o700); err != nil {
 		return err
 	}
 	tmp, err := os.CreateTemp(filepath.Dir(path), ".tmp-*")

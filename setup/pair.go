@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"crypto/subtle"
 	"errors"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -44,7 +45,7 @@ func Pair(ctx context.Context, path, client string, emit func(Event)) error {
 	}
 	switch {
 	case client == "telegram" && cfg.Telegram != nil:
-		err = pairTelegram(ctx, cfg.Telegram, emit)
+		err = pairTelegram(ctx, cfg.Telegram, filepath.Dir(path), emit)
 	case client == "signal" && cfg.Signal != nil:
 		err = pairSignal(ctx, cfg.Signal, emit)
 	default:
@@ -82,8 +83,8 @@ type tgUpdate struct {
 
 // pairTelegram long-polls the bot until a private chat sends the code. Run it
 // with the relay stopped: Telegram serves getUpdates to one poller.
-func pairTelegram(ctx context.Context, t *config.Telegram, emit func(Event)) error {
-	token, err := secrets.Get(secrets.TelegramToken)
+func pairTelegram(ctx context.Context, t *config.Telegram, dir string, emit func(Event)) error {
+	token, err := secrets.Get(dir, secrets.TelegramToken)
 	if err != nil {
 		return err
 	}

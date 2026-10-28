@@ -75,10 +75,7 @@ type signalConn struct {
 }
 
 func dialSignal(ctx context.Context, socket string) (*signalConn, error) {
-	if err := signalcli.CheckSocket(socket); err != nil {
-		return nil, err
-	}
-	conn, err := (&net.Dialer{}).DialContext(ctx, "unix", socket)
+	conn, err := signalcli.Dial("unix", socket)
 	if err != nil {
 		return nil, fmt.Errorf("setup: signal: %w", err)
 	}

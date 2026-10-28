@@ -3,10 +3,8 @@ package relay
 import (
 	"cmp"
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"log/slog"
 	"os/exec"
 	"strings"
@@ -35,10 +33,9 @@ type Bridge struct {
 	Cwd string
 	// RateLimit caps the messages a chat may send per minute; 0 means 20.
 	RateLimit int
-	// Audit, when set, receives one JSON line per approval decision.
-	Audit io.Writer
+	// Audit, when set, records each approval decision.
+	Audit *slog.Logger
 
-	auditMu   sync.Mutex
 	conn      *acp.ClientConn
 	canLoad   bool
 	chats     map[string]*chat // chat key → chat; Run's goroutine only
@@ -63,6 +60,12 @@ func (c *chat) current() acp.SessionID {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c.session
+}
+
+func (c *chat) setApprover(id string) {
+	c.mu.Lock()
+	c.approver = id
+	c.mu.Unlock()
 }
 
 func (c *chat) setSession(id acp.SessionID) {
@@ -166,10 +169,7 @@ func (b *Bridge) route(ctx context.Context, t Client, msg Inbound) {
 		b.chats[key] = c
 		go b.serve(ctx, c)
 	}
-	if !b.admit(c) {
-		return
-	}
-	// /cancel cannot wait behind the turn it stops.
+	// /cancel cannot wait behind the turn it stops, nor behind the rate limit.
 	if strings.TrimSpace(msg.Text) == "/cancel" {
 		if c.current() == "" {
 			return
@@ -177,6 +177,9 @@ func (b *Bridge) route(ctx context.Context, t Client, msg Inbound) {
 		if err := b.conn.Cancel(ctx, acp.CancelNotification{SessionID: c.current()}); err != nil {
 			b.Logger.Warn("cancel failed", "chat", key, "err", err)
 		}
+		return
+	}
+	if !b.admit(c) {
 		return
 	}
 	select {
@@ -205,10 +208,11 @@ func (b *Bridge) serve(ctx context.Context, c *chat) {
 		case <-ctx.Done():
 			return
 		case msg := <-c.inbox:
-			c.mu.Lock()
-			c.approver = msg.SenderID
-			c.mu.Unlock()
-			if err := b.handle(ctx, c, strings.TrimSpace(msg.Text)); err != nil {
+			c.setApprover(msg.SenderID)
+			err := b.handle(ctx, c, strings.TrimSpace(msg.Text))
+			// A permission request arriving after the turn has nobody to ask.
+			c.setApprover("")
+			if err != nil {
 				b.Logger.Error("turn failed", "chat", c.key, "err", err)
 				// The error stays in the log: its text can carry secrets
 				// (a client's request URL) that must not reach the chat.
@@ -363,22 +367,17 @@ func (b *Bridge) RequestPermission(ctx context.Context, req acp.RequestPermissio
 	return acp.RequestPermissionResponse{Outcome: acp.RequestPermissionOutcome{Cancelled: &acp.RequestPermissionOutcomeCancelled{}}}, nil
 }
 
-// audit appends one decision to the audit log.
 func (b *Bridge) audit(c *chat, approver, tool string, approved, timedOut bool) {
 	if b.Audit == nil {
 		return
 	}
-	decision := map[bool]string{true: "approved", false: "denied"}[approved]
+	decision := "denied"
 	if timedOut {
 		decision = "timeout"
+	} else if approved {
+		decision = "approved"
 	}
-	line, _ := json.Marshal(map[string]string{"time": time.Now().UTC().Format(time.RFC3339),
-		"chat": c.key, "approver": approver, "tool": tool, "decision": decision})
-	b.auditMu.Lock()
-	defer b.auditMu.Unlock()
-	if _, err := b.Audit.Write(append(line, '\n')); err != nil {
-		b.Logger.Error("audit log write failed", "err", err)
-	}
+	b.Audit.Info("approval", "chat", c.key, "approver", approver, "tool", tool, "decision", decision)
 }
 
 // typing keeps the client's typing indicator on, when it has one, until stop.

@@ -54,7 +54,7 @@ func TestPairTelegram(t *testing.T) {
 	if err := config.Save(path, config.Config{Telegram: &config.Telegram{}}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := secrets.Set(secrets.TelegramToken, token); err != nil {
+	if _, err := secrets.Set(config.Dir(), secrets.TelegramToken, token); err != nil {
 		t.Fatal(err)
 	}
 	var mu sync.Mutex

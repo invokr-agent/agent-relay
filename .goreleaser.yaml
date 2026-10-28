@@ -41,6 +41,7 @@ signs:
     args:
       - sign-blob
       - --yes
+      - --new-bundle-format
       - --bundle=${signature}
       - ${artifact}
 
