@@ -14,16 +14,3 @@ func TestChunkMessage(t *testing.T) {
 		t.Fatalf("4097 runes: %d chunks", len(got))
 	}
 }
-
-func TestAllowed(t *testing.T) {
-	set := map[string]bool{"+1test": true}
-	if !Allowed(false, set, "+1test") || Allowed(false, set, "+2other") {
-		t.Fatal("allowlist not applied")
-	}
-	if Allowed(false, nil, "+1test") {
-		t.Fatal("empty allowlist must deny (fail closed)")
-	}
-	if !Allowed(true, nil, "+anyone") {
-		t.Fatal("allowAll must admit any key")
-	}
-}

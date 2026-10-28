@@ -68,12 +68,11 @@ func TestApprovalIdentityAndCleanup(t *testing.T) {
 			}))
 			defer server.Close()
 			var err error
-			client, err = newWithBaseURL("identity", []int64{111, 222}, false, server.URL)
+			client, err = newWithBaseURL("identity", []int64{7}, true, server.URL)
 			if err != nil {
 				t.Fatal(err)
 			}
-			client.senders.Store("111", "7")
-			approved, err := client.AskApproval(ctx, "111", relay.ApprovalRequest{ID: " request "})
+			approved, err := client.AskApproval(ctx, "111", relay.ApprovalRequest{ID: " request ", Approver: "7"})
 			switch scenario {
 			case "wrong peer", "duplicate":
 				if !approved || err != nil {
@@ -127,7 +126,7 @@ func TestUnacceptedCallbacksNeverClaimDecision(t *testing.T) {
 				_, _ = fmt.Fprint(w, `{"ok":true,"result":true}`)
 			}))
 			defer server.Close()
-			client, err := newWithBaseURL("neutral", []int64{111, 222}, false, server.URL)
+			client, err := newWithBaseURL("neutral", []int64{7}, true, server.URL)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -135,7 +134,7 @@ func TestUnacceptedCallbacksNeverClaimDecision(t *testing.T) {
 				client.pending.Store("request", &kit.PendingApproval{ChatID: "111", Sender: "7", Decision: make(chan bool, 1)})
 			}
 			client.dispatchUpdate(context.Background(), tgUpdate{CallbackQuery: &tgCallbackQuery{
-				ID: "callback", Data: "approve:request", Message: tgMessage{MessageID: 42, Chat: tgChat{ID: 222}},
+				ID: "callback", From: &tgUser{ID: 7}, Data: "approve:request", Message: tgMessage{MessageID: 42, Chat: tgChat{ID: 222}},
 			}}, nil)
 			if acknowledgements.Load() != 1 {
 				t.Fatal("callback spinner not acknowledged")

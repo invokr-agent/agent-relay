@@ -4,7 +4,9 @@ import (
 	"cmp"
 	"context"
 	"errors"
+	"encoding/json"
 	"fmt"
+	"io"
 	"log/slog"
 	"os/exec"
 	"strings"
@@ -19,6 +21,7 @@ const (
 	inboxCap        = 8
 	approvalTimeout = 2 * time.Minute
 	typingRefresh   = 4 * time.Second
+	rateWindow      = time.Minute
 )
 
 // Bridge connects chat clients to one ACP agent. Each chat gets its own
@@ -30,7 +33,12 @@ type Bridge struct {
 	Logger  *slog.Logger
 	// Cwd is the working directory the agent's sessions are opened in.
 	Cwd string
+	// RateLimit caps the messages a chat may send per minute; 0 means 20.
+	RateLimit int
+	// Audit, when set, receives one JSON line per approval decision.
+	Audit io.Writer
 
+	auditMu   sync.Mutex
 	conn      *acp.ClientConn
 	canLoad   bool
 	chats     map[string]*chat // chat key → chat; Run's goroutine only
@@ -41,8 +49,11 @@ type Bridge struct {
 type chat struct {
 	key, id string
 	t       Client
-	inbox   chan string
+	inbox   chan Inbound
 	session acp.SessionID
+	approver string // SenderID of the running turn's message
+	window  time.Time
+	count   int // messages since window; Run's goroutine only
 	mu      sync.Mutex
 	reply   strings.Builder
 	loading bool // a session/load replay is running: its updates are history, not news
@@ -151,9 +162,12 @@ func (b *Bridge) route(ctx context.Context, t Client, msg Inbound) {
 	key := t.Name() + ":" + msg.ChatID
 	c, ok := b.chats[key]
 	if !ok {
-		c = &chat{key: key, id: msg.ChatID, t: t, inbox: make(chan string, inboxCap)}
+		c = &chat{key: key, id: msg.ChatID, t: t, inbox: make(chan Inbound, inboxCap)}
 		b.chats[key] = c
 		go b.serve(ctx, c)
+	}
+	if !b.admit(c) {
+		return
 	}
 	// /cancel cannot wait behind the turn it stops.
 	if strings.TrimSpace(msg.Text) == "/cancel" {
@@ -166,10 +180,20 @@ func (b *Bridge) route(ctx context.Context, t Client, msg Inbound) {
 		return
 	}
 	select {
-	case c.inbox <- msg.Text:
+	case c.inbox <- msg:
 	default:
 		notify(ctx, t, msg.ChatID, "busy — try again shortly")
 	}
+}
+
+// admit applies the chat's rate limit: RateLimit messages per minute, the
+// rest dropped silently so a flood cannot also flood the replies.
+func (b *Bridge) admit(c *chat) bool {
+	if now := time.Now(); now.Sub(c.window) >= rateWindow {
+		c.window, c.count = now, 0
+	}
+	c.count++
+	return c.count <= cmp.Or(b.RateLimit, 20)
 }
 
 // serve runs the chat's messages one turn at a time.
@@ -180,8 +204,11 @@ func (b *Bridge) serve(ctx context.Context, c *chat) {
 		select {
 		case <-ctx.Done():
 			return
-		case text := <-c.inbox:
-			if err := b.handle(ctx, c, strings.TrimSpace(text)); err != nil {
+		case msg := <-c.inbox:
+			c.mu.Lock()
+			c.approver = msg.SenderID
+			c.mu.Unlock()
+			if err := b.handle(ctx, c, strings.TrimSpace(msg.Text)); err != nil {
 				b.Logger.Error("turn failed", "chat", c.key, "err", err)
 				// The error stays in the log: its text can carry secrets
 				// (a client's request URL) that must not reach the chat.
@@ -299,23 +326,28 @@ func (b *Bridge) RequestPermission(ctx context.Context, req acp.RequestPermissio
 		return acp.RequestPermissionResponse{}, fmt.Errorf("permission request for unknown session %s", req.SessionID)
 	}
 	c := v.(*chat)
+	c.mu.Lock()
+	approver := c.approver
+	c.mu.Unlock()
 	askCtx, cancel := context.WithTimeout(ctx, approvalTimeout)
 	defer cancel()
+	tool := cmp.Or(req.ToolCall.Title, req.ToolCall.Name, string(req.ToolCall.ToolCallID))
 	approved, err := c.t.AskApproval(askCtx, c.id, ApprovalRequest{
 		// The counter alone: Telegram caps callback_data at 64 bytes.
-		ID:      fmt.Sprint(b.approvals.Add(1)),
-		Tool:    cmp.Or(req.ToolCall.Title, req.ToolCall.Name, string(req.ToolCall.ToolCallID)),
-		Summary: string(req.ToolCall.Kind),
-		Details: string(req.ToolCall.RawInput),
+		ID:       fmt.Sprint(b.approvals.Add(1)),
+		Tool:     tool,
+		Summary:  string(req.ToolCall.Kind),
+		Details:  string(req.ToolCall.RawInput),
+		Approver: approver,
 	})
-	cancelled := acp.RequestPermissionResponse{Outcome: acp.RequestPermissionOutcome{Cancelled: &acp.RequestPermissionOutcomeCancelled{}}}
-	if err != nil && ctx.Err() == nil && errors.Is(err, context.DeadlineExceeded) {
-		_ = c.t.Send(ctx, c.id, "approval timed out")
-		return cancelled, nil
-	}
-	if err != nil {
+	// A timeout is a denial: an unanswered prompt never lets the tool run.
+	timedOut := err != nil && ctx.Err() == nil && errors.Is(err, context.DeadlineExceeded)
+	if timedOut {
+		_ = c.t.Send(ctx, c.id, "approval timed out; denied")
+	} else if err != nil {
 		return acp.RequestPermissionResponse{}, err
 	}
+	b.audit(c, approver, tool, approved, timedOut)
 	kinds := []acp.PermissionOptionKind{acp.PermissionOptionKindRejectOnce, acp.PermissionOptionKindRejectAlways}
 	if approved {
 		kinds = []acp.PermissionOptionKind{acp.PermissionOptionKindAllowOnce, acp.PermissionOptionKindAllowAlways}
@@ -328,7 +360,25 @@ func (b *Bridge) RequestPermission(ctx context.Context, req acp.RequestPermissio
 			}
 		}
 	}
-	return cancelled, nil
+	return acp.RequestPermissionResponse{Outcome: acp.RequestPermissionOutcome{Cancelled: &acp.RequestPermissionOutcomeCancelled{}}}, nil
+}
+
+// audit appends one decision to the audit log.
+func (b *Bridge) audit(c *chat, approver, tool string, approved, timedOut bool) {
+	if b.Audit == nil {
+		return
+	}
+	decision := map[bool]string{true: "approved", false: "denied"}[approved]
+	if timedOut {
+		decision = "timeout"
+	}
+	line, _ := json.Marshal(map[string]string{"time": time.Now().UTC().Format(time.RFC3339),
+		"chat": c.key, "approver": approver, "tool": tool, "decision": decision})
+	b.auditMu.Lock()
+	defer b.auditMu.Unlock()
+	if _, err := b.Audit.Write(append(line, '\n')); err != nil {
+		b.Logger.Error("audit log write failed", "err", err)
+	}
 }
 
 // typing keeps the client's typing indicator on, when it has one, until stop.

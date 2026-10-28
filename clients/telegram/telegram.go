@@ -33,27 +33,27 @@ var (
 type Client struct {
 	token, baseURL string
 	allowedIDs     map[int64]bool
-	allowAll       bool
+	allowGroups    bool
 	httpClient     *http.Client
 	pending        sync.Map // map[string]*kit.PendingApproval — approval callbacks
-	senders        sync.Map // chat ID → user ID of the chat's latest message
 }
 
-// New constructs a Client. Returns an error if token is empty.
-func New(token string, allowedChatIDs []int64, allowAll bool) (*Client, error) {
-	return newWithBaseURL(token, allowedChatIDs, allowAll, "https://api.telegram.org")
+// New constructs a Client admitting messages from allowedUserIDs, in private
+// chats only unless allowGroups. An empty list admits nobody.
+func New(token string, allowedUserIDs []int64, allowGroups bool) (*Client, error) {
+	return newWithBaseURL(token, allowedUserIDs, allowGroups, "https://api.telegram.org")
 }
 
-func newWithBaseURL(token string, allowedChatIDs []int64, allowAll bool, baseURL string) (*Client, error) {
+func newWithBaseURL(token string, allowedUserIDs []int64, allowGroups bool, baseURL string) (*Client, error) {
 	if strings.TrimSpace(token) == "" {
 		return nil, fmt.Errorf("telegram: token is required")
 	}
-	ids := make(map[int64]bool, len(allowedChatIDs))
-	for _, id := range allowedChatIDs {
+	ids := make(map[int64]bool, len(allowedUserIDs))
+	for _, id := range allowedUserIDs {
 		ids[id] = true
 	}
 	return &Client{
-		token: token, allowedIDs: ids, allowAll: allowAll,
+		token: token, allowedIDs: ids, allowGroups: allowGroups,
 		httpClient: &http.Client{Timeout: 60 * time.Second}, baseURL: strings.TrimRight(baseURL, "/"),
 	}, nil
 }
@@ -95,23 +95,25 @@ func (c *Client) pollLoop(ctx context.Context, out chan<- relay.Inbound) {
 
 func (c *Client) dispatchUpdate(ctx context.Context, u tgUpdate, out chan<- relay.Inbound) {
 	if u.CallbackQuery != nil {
-		if kit.Allowed(c.allowAll, c.allowedIDs, u.CallbackQuery.Message.Chat.ID) {
+		if c.admits(u.CallbackQuery.Message.Chat, u.CallbackQuery.From) {
 			c.handleCallback(ctx, u.CallbackQuery)
 		}
 		return
 	}
-	if u.Message == nil || u.Message.Text == "" || !kit.Allowed(c.allowAll, c.allowedIDs, u.Message.Chat.ID) {
+	if u.Message == nil || u.Message.Text == "" || !c.admits(u.Message.Chat, u.Message.From) {
 		return
 	}
-	sender := ""
-	if u.Message.From != nil {
-		sender = u.Message.From.Username
-		c.senders.Store(strconv.FormatInt(u.Message.Chat.ID, 10), strconv.FormatInt(u.Message.From.ID, 10))
-	}
 	select {
-	case out <- relay.Inbound{ChatID: strconv.FormatInt(u.Message.Chat.ID, 10), Sender: sender, Text: u.Message.Text}:
+	case out <- relay.Inbound{ChatID: strconv.FormatInt(u.Message.Chat.ID, 10), Sender: u.Message.From.Username,
+		SenderID: strconv.FormatInt(u.Message.From.ID, 10), Text: u.Message.Text}:
 	case <-ctx.Done():
 	}
+}
+
+// admits reports whether an allow-listed user wrote in a chat type the
+// client serves. Fail closed: no sender or an empty list admits nobody.
+func (c *Client) admits(chat tgChat, from *tgUser) bool {
+	return from != nil && c.allowedIDs[from.ID] && (chat.Type == "private" || c.allowGroups)
 }
 
 func (c *Client) handleCallback(ctx context.Context, cq *tgCallbackQuery) {
@@ -128,8 +130,8 @@ func (c *Client) handleCallback(ctx context.Context, cq *tgCallbackQuery) {
 	_ = c.answerCallbackQuery(ctx, cq.ID)
 	if ok {
 		p := value.(*kit.PendingApproval)
-		// In a group the chat is shared: only the user whose message led to
-		// the request may answer it.
+		// In a group the chat is shared: only the user who started the turn
+		// may answer it.
 		if p.ChatID != strconv.FormatInt(cq.Message.Chat.ID, 10) || cq.From == nil || p.Sender != strconv.FormatInt(cq.From.ID, 10) {
 			return
 		}
@@ -167,9 +169,7 @@ func (c *Client) Send(ctx context.Context, chatID string, text string) error {
 // AskApproval sends an inline-keyboard message and blocks until the user
 // clicks a button or ctx expires.
 func (c *Client) AskApproval(ctx context.Context, chatID string, req relay.ApprovalRequest) (bool, error) {
-	sender, _ := c.senders.Load(chatID)
-	senderID, _ := sender.(string)
-	return kit.AwaitApproval(ctx, &c.pending, c.Name(), chatID, senderID, req, func(req relay.ApprovalRequest) error {
+	return kit.AwaitApproval(ctx, &c.pending, c.Name(), chatID, req.Approver, req, func(req relay.ApprovalRequest) error {
 		markup := map[string]any{"inline_keyboard": [][]map[string]string{{
 			{"text": "✅ Approve", "callback_data": "approve:" + req.ID}, {"text": "❌ Deny", "callback_data": "deny:" + req.ID},
 		}}}
@@ -301,7 +301,8 @@ type tgMessage struct {
 }
 
 type tgChat struct {
-	ID int64 `json:"id"`
+	ID   int64  `json:"id"`
+	Type string `json:"type"`
 }
 
 type tgUser struct {

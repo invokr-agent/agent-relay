@@ -1,24 +1,24 @@
 // Command agent-relay bridges Telegram and Signal chats to an ACP agent.
 //
-//	agent-relay -config agent-relay.json
+//	agent-relay [-config path]
 //
-// The config names the agent command to spawn and the clients to serve:
+// The config (default $XDG_CONFIG_HOME/agent-relay/config.json) names the
+// agent argv to spawn and the clients to serve:
 //
 //	{
+//	  "version": 1,
 //	  "agent": ["invokr", "acp"],
 //	  "cwd": "/home/me/project",
-//	  "store": "/home/me/.local/state/agent-relay/sessions.json",
-//	  "telegram": {"token": "...", "allowed_chat_ids": [123456789]},
-//	  "signal": {"socket": "/var/run/signal-cli/socket", "allowed_numbers": ["+15551234567"]}
+//	  "telegram": {"allowed_user_ids": [123456789]},
+//	  "signal": {"socket": "/run/user/1000/signal-cli/socket", "allowed_numbers": ["+15551234567"]}
 //	}
 //
-// AGENT_RELAY_TELEGRAM_TOKEN overrides the token so it can stay out of the file.
+// The Telegram token lives in the OS keyring (or a 0600 file);
+// AGENT_RELAY_TELEGRAM_TOKEN overrides it.
 package main
 
 import (
-	"cmp"
 	"context"
-	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -26,34 +26,21 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 
 	"github.com/invokr-agent/agent-relay"
 	signalcli "github.com/invokr-agent/agent-relay/clients/signal"
 	"github.com/invokr-agent/agent-relay/clients/telegram"
+	"github.com/invokr-agent/agent-relay/internal/config"
+	"github.com/invokr-agent/agent-relay/internal/secrets"
 )
-
-type config struct {
-	Agent    []string `json:"agent"`
-	Cwd      string   `json:"cwd"`
-	Store    string   `json:"store"`
-	Telegram struct {
-		Token          string  `json:"token"`
-		AllowedChatIDs []int64 `json:"allowed_chat_ids"`
-		AllowAll       bool    `json:"allow_all"`
-	} `json:"telegram"`
-	Signal struct {
-		Socket         string   `json:"socket"`
-		AllowedNumbers []string `json:"allowed_numbers"`
-		AllowAll       bool     `json:"allow_all"`
-	} `json:"signal"`
-}
 
 // version is set at release time by goreleaser.
 var version = "dev"
 
 func main() {
-	path := flag.String("config", "agent-relay.json", "config file")
+	path := flag.String("config", config.Path(), "config file")
 	showVersion := flag.Bool("version", false, "print the version and exit")
 	flag.Parse()
 	if *showVersion {
@@ -72,7 +59,7 @@ func run(path string, logger *slog.Logger) error {
 	if err != nil {
 		return err
 	}
-	clients, err := buildClients(cfg, logger)
+	clients, err := buildClients(cfg)
 	if err != nil {
 		return err
 	}
@@ -80,71 +67,72 @@ func run(path string, logger *slog.Logger) error {
 	if err != nil {
 		return err
 	}
+	audit, err := os.OpenFile(cfg.AuditLog, os.O_WRONLY|os.O_APPEND|os.O_CREATE, 0o600)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = audit.Close() }()
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	agent := exec.CommandContext(ctx, cfg.Agent[0], cfg.Agent[1:]...)
 	agent.Stderr = os.Stderr
-	bridge := &relay.Bridge{Store: store, Clients: clients, Logger: logger, Cwd: cfg.Cwd}
+	bridge := &relay.Bridge{Store: store, Clients: clients, Logger: logger, Cwd: cfg.Cwd, RateLimit: cfg.RateLimit, Audit: audit}
 	return bridge.Run(ctx, agent)
 }
 
-func load(path string) (config, error) {
-	var cfg config
-	data, err := os.ReadFile(path)
+// load reads the config, moving a version 0 file's token into the secret
+// store and rewriting the file as the current version.
+func load(path string) (config.Config, error) {
+	cfg, err := config.Load(path)
 	if err != nil {
 		return cfg, err
 	}
-	if err := json.Unmarshal(data, &cfg); err != nil {
-		return cfg, fmt.Errorf("%s: %w", path, err)
-	}
 	if len(cfg.Agent) == 0 {
-		return cfg, errors.New(`config: "agent" names the ACP agent command, e.g. ["invokr", "acp"]`)
+		return cfg, errors.New(`config: "agent" names the ACP agent argv, e.g. ["invokr", "acp"]`)
 	}
-	cfg.Telegram.Token = cmp.Or(os.Getenv("AGENT_RELAY_TELEGRAM_TOKEN"), cfg.Telegram.Token)
+	if t := cfg.Telegram; t != nil && t.LegacyToken != "" {
+		if _, err := secrets.Set(secrets.TelegramToken, t.LegacyToken); err != nil {
+			return cfg, err
+		}
+		t.LegacyToken = ""
+		if err := config.Save(path, cfg); err != nil {
+			return cfg, err
+		}
+	}
 	if cfg.Cwd == "" {
 		cfg.Cwd, _ = os.Getwd()
 	}
+	dir := filepath.Dir(path)
 	if cfg.Store == "" {
-		state, err := os.UserConfigDir()
-		if err != nil {
-			return cfg, err
-		}
-		cfg.Store = state + "/agent-relay/sessions.json"
+		cfg.Store = filepath.Join(dir, "sessions.json")
+	}
+	if cfg.AuditLog == "" {
+		cfg.AuditLog = filepath.Join(dir, "audit.log")
 	}
 	return cfg, nil
 }
 
-// buildClients starts each configured client. One without an allowlist
-// or an explicit allow_all refuses to start: fail closed, never open to all.
-func buildClients(cfg config, logger *slog.Logger) ([]relay.Client, error) {
+// buildClients starts each configured client. An empty allow-list admits
+// nobody: clients fail closed.
+func buildClients(cfg config.Config) ([]relay.Client, error) {
 	var out []relay.Client
-	if t := cfg.Telegram; t.Token != "" {
-		if len(t.AllowedChatIDs) == 0 && !t.AllowAll {
-			return nil, errors.New("telegram: refusing to start with no allowed_chat_ids and allow_all unset")
-		}
-		warnOpen(logger, "telegram", t.AllowAll)
-		c, err := telegram.New(t.Token, t.AllowedChatIDs, t.AllowAll)
+	if t := cfg.Telegram; t != nil {
+		token, err := secrets.Get(secrets.TelegramToken)
 		if err != nil {
-			return nil, fmt.Errorf("telegram: %w", err)
+			return nil, fmt.Errorf("telegram token: %w (run agent-relay setup)", err)
+		}
+		c, err := telegram.New(token, t.AllowedUserIDs, t.AllowGroups)
+		if err != nil {
+			return nil, err
 		}
 		out = append(out, c)
 	}
-	if s := cfg.Signal; s.Socket != "" {
-		if len(s.AllowedNumbers) == 0 && !s.AllowAll {
-			return nil, errors.New("signal: refusing to start with no allowed_numbers and allow_all unset")
-		}
-		warnOpen(logger, "signal", s.AllowAll)
-		c, err := signalcli.New(s.Socket, s.AllowedNumbers, s.AllowAll)
+	if s := cfg.Signal; s != nil {
+		c, err := signalcli.New(s.Socket, s.AllowedNumbers)
 		if err != nil {
-			return nil, fmt.Errorf("signal: %w", err)
+			return nil, err
 		}
 		out = append(out, c)
 	}
 	return out, nil
-}
-
-func warnOpen(logger *slog.Logger, name string, allowAll bool) {
-	if allowAll {
-		logger.Warn(name + " allow_all is enabled: every chat is admitted")
-	}
 }

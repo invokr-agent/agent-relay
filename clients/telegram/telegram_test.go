@@ -3,7 +3,6 @@ package telegram
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -55,7 +54,7 @@ func newFakeServer(t *testing.T, token string) *fakeTelegramServer {
 				ID:      "cq1",
 				From:    &tgUser{ID: cb.from},
 				Data:    "deny:" + cb.reqID,
-				Message: tgMessage{MessageID: 99, Chat: tgChat{ID: 111}, Text: "approve?"},
+				Message: tgMessage{MessageID: 99, Chat: tgChat{ID: 111, Type: "private"}, Text: "approve?"},
 			}
 			if cb.approved {
 				cq.Data = "approve:" + cb.reqID
@@ -97,13 +96,12 @@ func newFakeServer(t *testing.T, token string) *fakeTelegramServer {
 	return f
 }
 
-func newClient(t *testing.T, token string, allowedIDs []int64, allowAll bool, f *fakeTelegramServer) *Client {
+func newClient(t *testing.T, token string, allowedIDs []int64, allowGroups bool, f *fakeTelegramServer) *Client {
 	t.Helper()
-	c, err := newWithBaseURL(token, allowedIDs, allowAll, f.srv.URL)
+	c, err := newWithBaseURL(token, allowedIDs, allowGroups, f.srv.URL)
 	if err != nil {
 		t.Fatalf("newWithBaseURL: %v", err)
 	}
-	c.senders.Store("111", fmt.Sprint(requester))
 	return c
 }
 
@@ -113,8 +111,8 @@ func TestListen_AllowedChat(t *testing.T) {
 	f.updates = []tgUpdate{{
 		UpdateID: 1,
 		Message: &tgMessage{
-			MessageID: 10, Chat: tgChat{ID: 42},
-			From: &tgUser{Username: "alice"}, Text: "hello",
+			MessageID: 10, Chat: tgChat{ID: 42, Type: "private"},
+			From: &tgUser{ID: 42, Username: "alice"}, Text: "hello",
 		},
 	}}
 	c := newClient(t, "tok", []int64{42}, false, f)
@@ -126,7 +124,7 @@ func TestListen_AllowedChat(t *testing.T) {
 	}
 	select {
 	case msg := <-ch:
-		if msg.ChatID != "42" || msg.Text != "hello" {
+		if msg.ChatID != "42" || msg.SenderID != "42" || msg.Text != "hello" {
 			t.Fatalf("unexpected inbound: %+v", msg)
 		}
 	case <-ctx.Done():
@@ -138,7 +136,7 @@ func TestListen_DisallowedChat(t *testing.T) {
 	f := newFakeServer(t, "tok2")
 	f.updates = []tgUpdate{{
 		UpdateID: 1,
-		Message:  &tgMessage{MessageID: 10, Chat: tgChat{ID: 999}, Text: "hi"},
+		Message:  &tgMessage{MessageID: 10, Chat: tgChat{ID: 999, Type: "private"}, From: &tgUser{ID: 999}, Text: "hi"},
 	}}
 	c := newClient(t, "tok2", []int64{42}, false, f)
 	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
@@ -159,7 +157,7 @@ func TestListen_EmptyAllowlistDenies(t *testing.T) {
 	f := newFakeServer(t, "tok2b")
 	f.updates = []tgUpdate{{
 		UpdateID: 1,
-		Message:  &tgMessage{MessageID: 10, Chat: tgChat{ID: 999}, Text: "hi"},
+		Message:  &tgMessage{MessageID: 10, Chat: tgChat{ID: 999, Type: "private"}, From: &tgUser{ID: 999}, Text: "hi"},
 	}}
 	c := newClient(t, "tok2b", nil, false, f)
 	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
@@ -175,27 +173,28 @@ func TestListen_EmptyAllowlistDenies(t *testing.T) {
 	}
 }
 
-// T2c: allow_all admits chats not on any allowlist.
-func TestListen_AllowAllAdmits(t *testing.T) {
-	f := newFakeServer(t, "tok2c")
-	f.updates = []tgUpdate{{
-		UpdateID: 1,
-		Message:  &tgMessage{MessageID: 10, Chat: tgChat{ID: 999}, Text: "hi"},
-	}}
-	c := newClient(t, "tok2c", nil, true, f)
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
-	ch, err := c.Listen(ctx)
-	if err != nil {
-		t.Fatalf("Listen: %v", err)
-	}
-	select {
-	case msg := <-ch:
-		if msg.ChatID != "999" || msg.Text != "hi" {
-			t.Fatalf("unexpected inbound: %+v", msg)
+// A group message from an allowed user is admitted only with allowGroups.
+func TestListen_GroupsNeedAllowGroups(t *testing.T) {
+	for _, allowGroups := range []bool{false, true} {
+		f := newFakeServer(t, "tok2c")
+		f.updates = []tgUpdate{{
+			UpdateID: 1,
+			Message:  &tgMessage{MessageID: 10, Chat: tgChat{ID: -5, Type: "group"}, From: &tgUser{ID: 7}, Text: "hi"},
+		}}
+		c := newClient(t, "tok2c", []int64{7}, allowGroups, f)
+		ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+		ch, _ := c.Listen(ctx)
+		select {
+		case msg := <-ch:
+			if !allowGroups || msg.ChatID != "-5" {
+				t.Fatalf("allowGroups=%v: got %+v", allowGroups, msg)
+			}
+		case <-ctx.Done():
+			if allowGroups {
+				t.Fatal("group message not admitted with allowGroups")
+			}
 		}
-	case <-ctx.Done():
-		t.Fatal("timeout waiting for message with allow_all")
+		cancel()
 	}
 }
 
@@ -225,7 +224,7 @@ func TestSend_LongText(t *testing.T) {
 
 func TestAskApproval_Approve(t *testing.T) {
 	f := newFakeServer(t, "tok5")
-	c := newClient(t, "tok5", []int64{111}, false, f)
+	c := newClient(t, "tok5", []int64{requester}, false, f)
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 	// Start listen loop so callbacks are processed
@@ -237,7 +236,7 @@ func TestAskApproval_Approve(t *testing.T) {
 		f.callbackChan <- callbackInject{reqID: "req-1", approved: true, from: requester}
 	}()
 
-	approved, err := c.AskApproval(ctx, "111", relay.ApprovalRequest{
+	approved, err := c.AskApproval(ctx, "111", relay.ApprovalRequest{Approver: "7",
 		ID: "req-1", Tool: "shell", Summary: "ls /tmp",
 	})
 	if err != nil {
@@ -250,7 +249,7 @@ func TestAskApproval_Approve(t *testing.T) {
 
 func TestAskApproval_Deny(t *testing.T) {
 	f := newFakeServer(t, "tok6")
-	c := newClient(t, "tok6", []int64{111}, false, f)
+	c := newClient(t, "tok6", []int64{requester}, false, f)
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 	_, _ = c.Listen(ctx)
@@ -260,7 +259,7 @@ func TestAskApproval_Deny(t *testing.T) {
 		f.callbackChan <- callbackInject{reqID: "req-2", approved: false, from: requester}
 	}()
 
-	approved, err := c.AskApproval(ctx, "111", relay.ApprovalRequest{
+	approved, err := c.AskApproval(ctx, "111", relay.ApprovalRequest{Approver: "7",
 		ID: "req-2", Tool: "shell", Summary: "ls /tmp",
 	})
 	if err != nil {
@@ -275,7 +274,7 @@ func TestAskApproval_Deny(t *testing.T) {
 // it can resolve a pending approval.
 func TestAskApproval_CallbackFromDisallowedChatIgnored(t *testing.T) {
 	f := newFakeServer(t, "tok6b")
-	c := newClient(t, "tok6b", []int64{42}, false, f) // fake server's callback chat is 111
+	c := newClient(t, "tok6b", []int64{42}, false, f) // callback comes from requester, not allowlisted
 	ctx, cancel := context.WithTimeout(context.Background(), 150*time.Millisecond)
 	defer cancel()
 	_, _ = c.Listen(ctx)
@@ -285,7 +284,7 @@ func TestAskApproval_CallbackFromDisallowedChatIgnored(t *testing.T) {
 		f.callbackChan <- callbackInject{reqID: "req-3", approved: true, from: requester}
 	}()
 
-	approved, err := c.AskApproval(ctx, "111", relay.ApprovalRequest{ID: "req-3"})
+	approved, err := c.AskApproval(ctx, "111", relay.ApprovalRequest{Approver: "7", ID: "req-3"})
 	if err == nil {
 		t.Fatal("expected timeout error since the callback's chat is not allowlisted")
 	}
@@ -297,7 +296,7 @@ func TestAskApproval_CallbackFromDisallowedChatIgnored(t *testing.T) {
 // In a group any member can press the buttons; only the requester decides.
 func TestAskApproval_CallbackFromOtherGroupMemberIgnored(t *testing.T) {
 	f := newFakeServer(t, "tok6c")
-	c := newClient(t, "tok6c", []int64{111}, false, f)
+	c := newClient(t, "tok6c", []int64{requester, requester + 1}, false, f)
 	ctx, cancel := context.WithTimeout(context.Background(), 150*time.Millisecond)
 	defer cancel()
 	_, _ = c.Listen(ctx)
@@ -305,7 +304,7 @@ func TestAskApproval_CallbackFromOtherGroupMemberIgnored(t *testing.T) {
 		time.Sleep(20 * time.Millisecond)
 		f.callbackChan <- callbackInject{reqID: "req-4", approved: true, from: requester + 1}
 	}()
-	approved, err := c.AskApproval(ctx, "111", relay.ApprovalRequest{ID: "req-4"})
+	approved, err := c.AskApproval(ctx, "111", relay.ApprovalRequest{Approver: "7", ID: "req-4"})
 	if approved || err == nil {
 		t.Fatalf("another member's callback decided the request: %v, %v", approved, err)
 	}
@@ -330,7 +329,7 @@ func TestAskApproval_Timeout(t *testing.T) {
 	c := newClient(t, "tok7", nil, false, f)
 	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
 	defer cancel()
-	approved, err := c.AskApproval(ctx, "111", relay.ApprovalRequest{ID: "req-timeout"})
+	approved, err := c.AskApproval(ctx, "111", relay.ApprovalRequest{Approver: "7", ID: "req-timeout"})
 	if err == nil {
 		t.Fatal("expected timeout error")
 	}
@@ -367,7 +366,7 @@ func TestListen_RetryOn500(t *testing.T) {
 		if n == 2 {
 			updates = []tgUpdate{{
 				UpdateID: 1,
-				Message:  &tgMessage{MessageID: 1, Chat: tgChat{ID: 42}, Text: "hello"},
+				Message:  &tgMessage{MessageID: 1, Chat: tgChat{ID: 42, Type: "private"}, From: &tgUser{ID: 42}, Text: "hello"},
 			}}
 		}
 		_ = json.NewEncoder(w).Encode(map[string]any{"ok": true, "result": updates})

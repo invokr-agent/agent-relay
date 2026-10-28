@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -53,7 +55,7 @@ func consumeSubscribe(conn net.Conn) {
 	_, _ = conn.Write([]byte(ack))
 }
 
-func newTestClient(t *testing.T, allowed []string, allowAll bool) (*Client, net.Conn) {
+func newTestClient(t *testing.T, allowed []string) (*Client, net.Conn) {
 	t.Helper()
 	dialer, server := pipeDialer()
 	var c *Client
@@ -63,7 +65,7 @@ func newTestClient(t *testing.T, allowed []string, allowAll bool) (*Client, net.
 		done <- struct{}{}
 	}()
 	var err error
-	c, err = newWithDialer("/fake.sock", allowed, allowAll, dialer)
+	c, err = newWithDialer("/fake.sock", allowed, dialer)
 	if err != nil {
 		t.Fatalf("newWithDialer: %v", err)
 	}
@@ -88,7 +90,7 @@ func TestNew_SubscribeSent(t *testing.T) {
 		ack := `{"jsonrpc":"2.0","id":1,"result":{}}` + "\n"
 		_, _ = server.Write([]byte(ack))
 	}()
-	_, err := newWithDialer("/fake.sock", nil, false, dialer)
+	_, err := newWithDialer("/fake.sock", nil, dialer)
 	if err != nil {
 		t.Fatalf("newWithDialer: %v", err)
 	}
@@ -113,7 +115,7 @@ func TestNew_PreservesNotificationBeforeSubscribeAck(t *testing.T) {
 		writeNotification(server, "+1allowed", "arrived during subscribe")
 		_, _ = server.Write([]byte(`{"jsonrpc":"2.0","id":1,"result":{}}` + "\n"))
 	}()
-	c, err := newWithDialer("/fake.sock", []string{"+1allowed"}, false, dialer)
+	c, err := newWithDialer("/fake.sock", []string{"+1allowed"}, dialer)
 	if err != nil {
 		t.Fatalf("newWithDialer: %v", err)
 	}
@@ -134,7 +136,7 @@ func TestNew_PreservesNotificationBeforeSubscribeAck(t *testing.T) {
 }
 
 func TestListen_AllowedNumber(t *testing.T) {
-	c, server := newTestClient(t, []string{"+12025551234"}, false)
+	c, server := newTestClient(t, []string{"+12025551234"})
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	ch, _ := c.Listen(ctx)
@@ -151,7 +153,7 @@ func TestListen_AllowedNumber(t *testing.T) {
 
 // S3: inbound from blocked number — nothing on channel.
 func TestListen_BlockedNumber(t *testing.T) {
-	c, server := newTestClient(t, []string{"+1allowed"}, false)
+	c, server := newTestClient(t, []string{"+1allowed"})
 	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
 	defer cancel()
 	ch, _ := c.Listen(ctx)
@@ -168,7 +170,7 @@ func TestListen_BlockedNumber(t *testing.T) {
 
 // S3b: empty allowlist denies everyone (fail closed).
 func TestListen_EmptyAllowlistDenies(t *testing.T) {
-	c, server := newTestClient(t, nil, false)
+	c, server := newTestClient(t, nil)
 	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
 	defer cancel()
 	ch, _ := c.Listen(ctx)
@@ -183,26 +185,32 @@ func TestListen_EmptyAllowlistDenies(t *testing.T) {
 	}
 }
 
-// S3c: allow_all admits numbers not on any allowlist.
-func TestListen_AllowAllAdmits(t *testing.T) {
-	c, server := newTestClient(t, nil, true)
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
-	ch, _ := c.Listen(ctx)
-	go writeNotification(server, "+1anyone", "hello")
-	select {
-	case msg := <-ch:
-		if msg.ChatID != "+1anyone" || msg.Text != "hello" {
-			t.Fatalf("unexpected: %+v", msg)
-		}
-	case <-ctx.Done():
-		t.Fatal("timeout waiting for message with allow_all")
+func TestCheckSocket(t *testing.T) {
+	dir, err := os.MkdirTemp("", "sock")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = os.RemoveAll(dir) }()
+	path := filepath.Join(dir, "s")
+	l, err := net.Listen("unix", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = l.Close() }()
+	if err := CheckSocket(path); err != nil {
+		t.Fatalf("own socket refused: %v", err)
+	}
+	if err := os.WriteFile(path+".file", nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if CheckSocket(path+".file") == nil {
+		t.Fatal("regular file accepted as socket")
 	}
 }
 
 // S4: Send method — correct JSON-RPC call with recipient array.
 func TestSend_RPCCall(t *testing.T) {
-	c, server := newTestClient(t, nil, false)
+	c, server := newTestClient(t, nil)
 	defer func() { _ = server.Close() }()
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
@@ -234,7 +242,7 @@ func TestSend_RPCCall(t *testing.T) {
 }
 
 func TestSetTyping_StartAndStop(t *testing.T) {
-	c, server := newTestClient(t, nil, false)
+	c, server := newTestClient(t, nil)
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 	_, _ = c.Listen(ctx)
@@ -268,7 +276,7 @@ func TestSetTyping_StartAndStop(t *testing.T) {
 }
 
 func TestAskApproval_YES(t *testing.T) {
-	c, server := newTestClient(t, nil, false)
+	c, server := newTestClient(t, nil)
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 	_, _ = c.Listen(ctx)
@@ -297,7 +305,7 @@ func TestAskApproval_YES(t *testing.T) {
 }
 
 func TestAskApproval_RegistersBeforeSendingPrompt(t *testing.T) {
-	c, server := newTestClient(t, nil, false)
+	c, server := newTestClient(t, nil)
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 	_, _ = c.Listen(ctx)
@@ -357,7 +365,7 @@ func TestApprovalRepliesRouteByRequestID(t *testing.T) {
 }
 
 func TestAskApproval_NO(t *testing.T) {
-	c, server := newTestClient(t, nil, false)
+	c, server := newTestClient(t, nil)
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 	_, _ = c.Listen(ctx)
@@ -386,7 +394,7 @@ func TestAskApproval_NO(t *testing.T) {
 }
 
 func TestAskApproval_Cancel(t *testing.T) {
-	c, server := newTestClient(t, nil, false)
+	c, server := newTestClient(t, nil)
 	defer func() { _ = server.Close() }()
 	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
 	defer cancel()
@@ -406,7 +414,7 @@ func TestAskApproval_Cancel(t *testing.T) {
 
 // S9: Long message chunked at 2000 runes.
 func TestSend_LongMessage(t *testing.T) {
-	c, server := newTestClient(t, nil, false)
+	c, server := newTestClient(t, nil)
 	defer func() { _ = server.Close() }()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -495,7 +503,7 @@ func TestListen_ReconnectsAfterCleanEOF(t *testing.T) {
 		}
 	}
 	go consumeSubscribe(server1)
-	c, err := newWithDialer("/fake.sock", []string{"+1allowed"}, false, dialer)
+	c, err := newWithDialer("/fake.sock", []string{"+1allowed"}, dialer)
 	if err != nil {
 		t.Fatalf("newWithDialer: %v", err)
 	}
@@ -536,7 +544,7 @@ func writeEnvelope(conn net.Conn, envelope map[string]any) {
 // Newer signal-cli sends a UUID as source; the number is in sourceNumber.
 // Group messages are skipped rather than answered as DMs.
 func TestListen_SourceNumberAndGroups(t *testing.T) {
-	c, server := newTestClient(t, []string{"+1allowed"}, false)
+	c, server := newTestClient(t, []string{"+1allowed"})
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	ch, _ := c.Listen(ctx)
@@ -558,7 +566,7 @@ func TestListen_SourceNumberAndGroups(t *testing.T) {
 
 // Lines past bufio.Scanner's 64 KiB default must not kill the connection.
 func TestListen_LongLine(t *testing.T) {
-	c, server := newTestClient(t, []string{"+1allowed"}, false)
+	c, server := newTestClient(t, []string{"+1allowed"})
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	ch, _ := c.Listen(ctx)
@@ -578,7 +586,7 @@ func TestListen_LongLine(t *testing.T) {
 func TestSend_TimesOutWithoutResponse(t *testing.T) {
 	defer func(d time.Duration) { rpcTimeout = d }(rpcTimeout)
 	rpcTimeout = 50 * time.Millisecond
-	c, server := newTestClient(t, nil, false)
+	c, server := newTestClient(t, nil)
 	go func() { _, _ = io.Copy(io.Discard, server) }()
 	done := make(chan error, 1)
 	go func() { done <- c.Send(context.Background(), "+1", "hi") }()

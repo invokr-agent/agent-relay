@@ -8,9 +8,11 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"os"
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"github.com/invokr-agent/agent-relay"
@@ -38,7 +40,6 @@ var (
 type Client struct {
 	socketPath     string
 	allowedNumbers map[string]bool
-	allowAll       bool
 	conn           net.Conn
 	reader         *bufio.Scanner
 	preAckLines    [][]byte
@@ -49,19 +50,37 @@ type Client struct {
 	dialer         func(network, address string) (net.Conn, error)
 }
 
-// New dials the UNIX socket and sends subscribeReceive.
-// Returns an error if the socket is unreachable or the ack is not received
+// New dials the UNIX socket and sends subscribeReceive. Only allowedNumbers
+// are served; an empty list admits nobody. Returns an error if the path is not
+// a socket owned by this user, is unreachable, or the ack is not received
 // within 5 seconds.
-func New(socketPath string, allowedNumbers []string, allowAll bool) (*Client, error) {
-	return newWithDialer(socketPath, allowedNumbers, allowAll, (&net.Dialer{Timeout: dialTimeout}).Dial)
+func New(socketPath string, allowedNumbers []string) (*Client, error) {
+	if err := CheckSocket(socketPath); err != nil {
+		return nil, err
+	}
+	return newWithDialer(socketPath, allowedNumbers, (&net.Dialer{Timeout: dialTimeout}).Dial)
 }
 
-func newWithDialer(socketPath string, allowedNumbers []string, allowAll bool, dialer func(string, string) (net.Conn, error)) (*Client, error) {
+// CheckSocket refuses a path that is not a Unix socket owned by the current
+// user: another user's socket could impersonate signal-cli.
+func CheckSocket(path string) error {
+	fi, err := os.Lstat(path)
+	if err != nil {
+		return fmt.Errorf("signal: %w", err)
+	}
+	st, ok := fi.Sys().(*syscall.Stat_t)
+	if fi.Mode()&os.ModeSocket == 0 || !ok || int(st.Uid) != os.Getuid() {
+		return fmt.Errorf("signal: %s is not a Unix socket owned by this user", path)
+	}
+	return nil
+}
+
+func newWithDialer(socketPath string, allowedNumbers []string, dialer func(string, string) (net.Conn, error)) (*Client, error) {
 	allowed := make(map[string]bool, len(allowedNumbers))
 	for _, n := range allowedNumbers {
 		allowed[n] = true
 	}
-	c := &Client{socketPath: socketPath, allowedNumbers: allowed, allowAll: allowAll, dialer: dialer}
+	c := &Client{socketPath: socketPath, allowedNumbers: allowed, dialer: dialer}
 	conn, err := dialer("unix", socketPath)
 	if err != nil {
 		return nil, fmt.Errorf("signal: dial %s: %w", socketPath, err)
@@ -214,7 +233,7 @@ func (c *Client) dispatchLine(ctx context.Context, line []byte, out chan<- relay
 	if c.handleApprovalReply(source, text) {
 		return
 	}
-	if !kit.Allowed(c.allowAll, c.allowedNumbers, source) {
+	if !c.allowedNumbers[source] {
 		return
 	}
 	select {

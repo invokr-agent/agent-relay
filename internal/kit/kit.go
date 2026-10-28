@@ -35,9 +35,3 @@ func WaitBackoff(ctx context.Context, backoff *time.Duration, limit time.Duratio
 	*backoff = min(*backoff*2, limit)
 	return true
 }
-
-// Allowed reports whether key may be dispatched. Fail closed: an empty
-// allowlist admits nobody unless allowAll is set.
-func Allowed[T comparable](allowAll bool, set map[T]bool, key T) bool {
-	return allowAll || set[key]
-}

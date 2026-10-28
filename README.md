@@ -4,7 +4,7 @@ Chat with a coding agent from Telegram or Signal. agent-relay is an [ACP](https:
 
 - **Sessions:** each chat has its own agent session. It is kept across restarts and resumed with `session/load` when the agent supports it; replayed history is not posted again.
 - **Turns:** a chat's messages run one turn at a time. The streamed answer is posted as one message, split to the platform's size limit.
-- **Approvals:** permission requests become an approval prompt in the chat (buttons on Telegram, a reply on Signal). Yes picks the agent's allow-once option, no its reject-once option. Unanswered prompts time out after 2 minutes.
+- **Approvals:** permission requests become an approval prompt in the chat (buttons on Telegram, a reply on Signal). Yes picks the agent's allow-once option, no its reject-once option. Unanswered prompts are denied after 2 minutes.
 - **Commands:**
   - `/new` starts a fresh session.
   - `/cancel` stops the running turn.
@@ -14,22 +14,26 @@ Chat with a coding agent from Telegram or Signal. agent-relay is an [ACP](https:
 
 ```
 go install github.com/invokr-agent/agent-relay/cmd/agent-relay@latest
-agent-relay -config agent-relay.json
+agent-relay   # reads $XDG_CONFIG_HOME/agent-relay/config.json
 ```
 
 ```json
 {
+  "version": 1,
   "agent": ["invokr", "acp"],
   "cwd": "/home/me/project",
-  "telegram": {"token": "...", "allowed_chat_ids": [123456789]},
-  "signal": {"socket": "/var/run/signal-cli/socket", "allowed_numbers": ["+15551234567"]}
+  "telegram": {"allowed_user_ids": [123456789]},
+  "signal": {"socket": "/run/user/1000/signal-cli/socket", "allowed_numbers": ["+15551234567"]}
 }
 ```
 
-- **Telegram token:** `AGENT_RELAY_TELEGRAM_TOKEN` overrides it, so the token can stay out of the file.
-- **Access:** a transport refuses to start without an allowlist, unless `allow_all` is set explicitly. Chats not on the allowlist get "Access denied."
-- **Session map:** saved to `store`, which defaults to `<user config dir>/agent-relay/sessions.json`.
-- **Signal:** needs [signal-cli](https://github.com/AsamK/signal-cli) running in JSON-RPC mode on that socket.
+- **Config:** written 0600 in a 0700 directory. `version` is the schema; changes are additive. A version 0 file (`token`, `allowed_chat_ids`) is migrated on start: the token moves to the secret store, private chat IDs become user IDs.
+- **Secrets:** the Telegram token is kept in the OS keyring, or `secrets.json` (0600) beside the config when no keyring is reachable. `AGENT_RELAY_TELEGRAM_TOKEN` overrides both.
+- **Access:** Telegram admits the listed user IDs in private chats only, unless `allow_groups`; Signal admits the listed numbers. An empty list admits nobody. Telegram is not end-to-end encrypted: prefer Signal for sensitive work.
+- **Approvals:** only the user whose message started the turn can answer; an unanswered prompt denies. Every decision is appended to `audit_log` (default `audit.log` beside the config).
+- **Rate limit:** `rate_limit` messages per chat per minute (default 20); the rest are dropped.
+- **Agent:** `agent` is an argv, run without a shell. The session map (`store`, default `sessions.json` beside the config) is 0600.
+- **Signal:** needs [signal-cli](https://github.com/AsamK/signal-cli) in JSON-RPC mode on a Unix socket owned by the same user.
 
 ## Verify a release
 
