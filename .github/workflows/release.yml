@@ -1,0 +1,51 @@
+name: release
+
+# Triggered by vX.Y.Z tags. goreleaser infers owner/repo from the git remote,
+# publishes checksummed archives to GitHub Releases, and cosign signs
+# checksums.txt keylessly. The version comes from the tag alone.
+on:
+  push:
+    tags:
+      - 'v*'
+      - '!v*-edge.*'
+
+# Release job only; it raises its own permissions inside the job.
+permissions:
+  contents: read
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      # Keyless signing: cosign trades the job's OIDC token for a Fulcio
+      # certificate naming this workflow.
+      id-token: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Refuse tags not cut from main
+        run: |
+          git merge-base --is-ancestor "$GITHUB_SHA" origin/main || \
+            { echo "tagged commit is not on main; cut the tag from main first"; exit 1; }
+      - name: Refuse non-SemVer tags
+        shell: bash
+        run: |
+          [[ "$GITHUB_REF_NAME" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z.-]+)?$ ]] || { echo "expected vX.Y.Z, got $GITHUB_REF_NAME"; exit 1; }
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+      # Installed with go rather than sigstore/cosign-installer: the org only
+      # allows GitHub-owned and a few listed actions.
+      - name: Install cosign
+        run: go install github.com/sigstore/cosign/v2/cmd/cosign@v2.4.1
+      - uses: goreleaser/goreleaser-action@a4f02ab5355a589de60d917a659ce617ed19b3de # v7.3.0
+        with:
+          args: release --clean
+          distribution: goreleaser
+          version: v2.18.3
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          GORELEASER_CURRENT_TAG: ${{ github.ref_name }}

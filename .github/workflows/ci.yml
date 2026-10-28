@@ -20,10 +20,10 @@ jobs:
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
-      # make lint runs golangci-lint through `go run` rather than
+      # make lint-ci builds the custom golangci-lint (goclocbudget) rather than
       # golangci-lint-action: the org only allows GitHub-owned and a few
       # listed actions.
-      - run: make lint
+      - run: make lint-ci
 
   test:
     runs-on: ubuntu-latest

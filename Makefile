@@ -1,10 +1,27 @@
-.PHONY: test lint build
+.PHONY: test lint lint-ci verify build
+
+CUSTOM_LINT ?= ./custom-golangci-lint
+LINT_GOTOOLCHAIN ?= go1.26.3
+
+# Built from tools/customlint (a separate module) with plain `go build`; it
+# adds the goclocbudget plugin to golangci-lint, as in invokr.
+custom-golangci-lint: tools/customlint/main.go tools/customlint/go.mod tools/customlint/go.sum
+	go build -C tools/customlint -o "$(CURDIR)/custom-golangci-lint" .
 
 test:
 	go test -race ./...
 
 lint:
-	go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.15.0 run ./...
+	@if [ -x $(CUSTOM_LINT) ]; then \
+		GOTOOLCHAIN=$(LINT_GOTOOLCHAIN) $(CUSTOM_LINT) run; \
+	else \
+		GOTOOLCHAIN=$(LINT_GOTOOLCHAIN) golangci-lint run ./...; \
+	fi
+
+lint-ci: custom-golangci-lint
+	GOTOOLCHAIN=$(LINT_GOTOOLCHAIN) $(CUSTOM_LINT) run
+
+verify: test lint
 
 build:
 	go build -o bin/agent-relay ./cmd/agent-relay

@@ -1,0 +1,55 @@
+version: 2
+
+project_name: agent-relay
+
+before:
+  hooks:
+    - go mod tidy
+
+builds:
+  - id: agent-relay
+    main: ./cmd/agent-relay
+    binary: agent-relay
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - darwin
+    goarch:
+      - amd64
+      - arm64
+    ldflags:
+      - -s -w
+      - -X main.version={{.Version}}
+
+archives:
+  - ids:
+      - agent-relay
+    formats: [tar.gz]
+    name_template: >-
+      {{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}
+    files:
+      - LICENSE*
+      - README.md
+
+checksum:
+  name_template: checksums.txt
+
+# Keyless: cosign signs checksums.txt with a short-lived certificate issued to
+# this repository's release workflow through GitHub OIDC. Verifiers pin that
+# identity (see README); checksums.txt then vouches for every archive.
+signs:
+  - cmd: cosign
+    artifacts: checksum
+    signature: "${artifact}.sig"
+    certificate: "${artifact}.pem"
+    args:
+      - sign-blob
+      - --yes
+      - --output-signature=${signature}
+      - --output-certificate=${certificate}
+      - ${artifact}
+
+release:
+  draft: false
+  prerelease: auto

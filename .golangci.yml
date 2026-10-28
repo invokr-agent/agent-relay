@@ -1,20 +1,54 @@
 version: "2"
+
 linters:
-  # The same complexity limits invokr keeps; tests are exempt, as there.
-  enable: [gocyclo, gocognit, funlen, nestif, dupl, misspell]
+  enable:
+    - gocyclo
+    - gocognit
+    - funlen
+    - nestif
+    - dupl
+    - misspell
+    - goclocbudget
+
   settings:
     gocyclo:
       min-complexity: 12
+
     gocognit:
       min-complexity: 15
+
     funlen:
       lines: 80
       statements: 50
+      ignore-comments: true
+
     nestif:
       min-complexity: 5
+
     dupl:
       threshold: 100
+
+    custom:
+      goclocbudget:
+        type: "module"
+        description: "Enforces the implementation Go LOC budget using gocloc."
+        settings:
+          # Implementation Go LOC ceiling (tests excluded). Before raising it,
+          # trim lines; raise only to the measured count. History: git log -p .golangci.yml
+          max-go-code-lines: 1256
+          include-tests: false
+          exclude-generated: true
+          exclude-dirs:
+            - vendor
+            - .git
+            - tools
+
   exclusions:
     rules:
       - path: _test\.go
-        linters: [gocyclo, gocognit, funlen, nestif, dupl]
+        linters:
+          - gocyclo
+          - gocognit
+          - funlen
+          - nestif
+          - dupl
