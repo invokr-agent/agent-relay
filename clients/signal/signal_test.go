@@ -65,7 +65,7 @@ func newTestClient(t *testing.T, allowed []string) (*Client, net.Conn) {
 		done <- struct{}{}
 	}()
 	var err error
-	c, err = newWithDialer("/fake.sock", allowed, dialer)
+	c, err = newWithDialer("/fake.sock", "", allowed, dialer)
 	if err != nil {
 		t.Fatalf("newWithDialer: %v", err)
 	}
@@ -90,7 +90,7 @@ func TestNew_SubscribeSent(t *testing.T) {
 		ack := `{"jsonrpc":"2.0","id":1,"result":{}}` + "\n"
 		_, _ = server.Write([]byte(ack))
 	}()
-	_, err := newWithDialer("/fake.sock", nil, dialer)
+	_, err := newWithDialer("/fake.sock", "", nil, dialer)
 	if err != nil {
 		t.Fatalf("newWithDialer: %v", err)
 	}
@@ -115,7 +115,7 @@ func TestNew_PreservesNotificationBeforeSubscribeAck(t *testing.T) {
 		writeNotification(server, "+1allowed", "arrived during subscribe")
 		_, _ = server.Write([]byte(`{"jsonrpc":"2.0","id":1,"result":{}}` + "\n"))
 	}()
-	c, err := newWithDialer("/fake.sock", []string{"+1allowed"}, dialer)
+	c, err := newWithDialer("/fake.sock", "", []string{"+1allowed"}, dialer)
 	if err != nil {
 		t.Fatalf("newWithDialer: %v", err)
 	}
@@ -507,7 +507,7 @@ func TestListen_ReconnectsAfterCleanEOF(t *testing.T) {
 		}
 	}
 	go consumeSubscribe(server1)
-	c, err := newWithDialer("/fake.sock", []string{"+1allowed"}, dialer)
+	c, err := newWithDialer("/fake.sock", "", []string{"+1allowed"}, dialer)
 	if err != nil {
 		t.Fatalf("newWithDialer: %v", err)
 	}
@@ -601,5 +601,30 @@ func TestSend_TimesOutWithoutResponse(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("Send hung without a response")
+	}
+}
+
+// Only the owner's own Note to Self arrives from sync messages; what the
+// owner sends to other people stays private.
+func TestNoteToSelf(t *testing.T) {
+	c := &Client{account: "+1me"}
+	sync := func(src, dest string) signalParams {
+		var p signalParams
+		if err := json.Unmarshal(fmt.Appendf(nil, `{"envelope":{"sourceNumber":%q,"syncMessage":{"sentMessage":{"message":"hi","destinationNumber":%q}}}}`, src, dest), &p); err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+	if src, text, ok := c.message(sync("+1me", "+1me")); !ok || src != "+1me" || text != "hi" {
+		t.Fatal("Note to Self dropped")
+	}
+	if _, _, ok := c.message(sync("+1me", "+1friend")); ok {
+		t.Fatal("message to someone else relayed")
+	}
+	if _, _, ok := (&Client{}).message(sync("+1me", "+1me")); ok {
+		t.Fatal("sync relayed without an account")
+	}
+	if got := c.withAccount(map[string]any{}); got["account"] != "+1me" {
+		t.Fatal("account not sent")
 	}
 }

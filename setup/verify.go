@@ -41,10 +41,17 @@ func telegramCall(ctx context.Context, token, method string, params, result any)
 	defer func() { _ = resp.Body.Close() }()
 	var reply struct {
 		OK          bool            `json:"ok"`
+		ErrorCode   int             `json:"error_code"`
 		Description string          `json:"description"`
 		Result      json.RawMessage `json:"result"`
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&reply); err != nil || !reply.OK {
+	if err := json.NewDecoder(resp.Body).Decode(&reply); err != nil {
+		return fmt.Errorf("setup: telegram %s: %w", method, err)
+	}
+	if reply.ErrorCode == http.StatusConflict {
+		return errors.New("setup: telegram: another poller holds this bot; stop agent-relay (or deleteWebhook) before pairing")
+	}
+	if !reply.OK {
 		return fmt.Errorf("setup: telegram %s failed: %s", method, reply.Description)
 	}
 	return json.Unmarshal(reply.Result, result)

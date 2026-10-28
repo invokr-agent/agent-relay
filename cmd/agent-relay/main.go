@@ -145,7 +145,7 @@ func buildClients(cfg config.Config, dir string) ([]relay.Client, error) {
 		out = append(out, c)
 	}
 	if s := cfg.Signal; s != nil {
-		c, err := signalcli.New(s.Socket, s.AllowedNumbers)
+		c, err := signalcli.New(s.Socket, s.Account, s.AllowedNumbers)
 		if err != nil {
 			return nil, err
 		}

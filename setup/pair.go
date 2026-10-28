@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"crypto/subtle"
 	"errors"
+	"fmt"
 	"path/filepath"
 	"strings"
 	"time"
@@ -22,14 +23,22 @@ const maxAttempts = 5
 // codeAlphabet has 32 symbols, without look-alikes (I, O, 0, 1).
 const codeAlphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
 
-// Event is one step of a pairing, streamed to the front end.
+// Event is one step of a pairing, streamed to the front end as JSON lines:
+//
+//	{"event":"code","code":"ABCD2345","bot":"relaybot","uri":"https://t.me/relaybot?start=ABCD2345"}
+//	{"event":"qr","uri":"sgnl://linkdevice?..."}
+//	{"event":"waiting"}
+//	{"event":"paired","user_id":7,"name":"alice"}   Telegram
+//	{"event":"paired","number":"+15551234567"}      Signal
+//	{"event":"error","message":"..."}
 type Event struct {
-	Event   string `json:"event"` // code, qr, waiting, paired, error
+	Event   string `json:"event"`
 	Code    string `json:"code,omitempty"`
 	Bot     string `json:"bot,omitempty"`
 	URI     string `json:"uri,omitempty"`
 	UserID  int64  `json:"user_id,omitempty"`
 	Name    string `json:"name,omitempty"`
+	Number  string `json:"number,omitempty"`
 	Message string `json:"message,omitempty"`
 }
 
@@ -51,13 +60,15 @@ func Pair(ctx context.Context, path, client string, emit func(Event)) error {
 	default:
 		return errors.New("setup: configure " + client + " before pairing")
 	}
-	if ctx.Err() != nil {
+	switch {
+	case err == nil:
+		return config.Save(path, cfg)
+	case errors.Is(ctx.Err(), context.DeadlineExceeded):
 		return errors.New("setup: pairing timed out")
+	case errors.Is(ctx.Err(), context.Canceled):
+		return errors.New("setup: pairing cancelled")
 	}
-	if err != nil {
-		return err
-	}
-	return config.Save(path, cfg)
+	return err
 }
 
 func newCode() string {
@@ -78,11 +89,13 @@ type tgUpdate struct {
 		} `json:"chat"`
 		From *telegramUser `json:"from"`
 		Text string        `json:"text"`
+		Date int64         `json:"date"`
 	} `json:"message"`
 }
 
-// pairTelegram long-polls the bot until a private chat sends the code. Run it
-// with the relay stopped: Telegram serves getUpdates to one poller.
+// pairTelegram long-polls the bot until a private chat sends the code (or
+// /start CODE through the t.me link). Run it with the relay stopped:
+// Telegram serves getUpdates to one poller.
 func pairTelegram(ctx context.Context, t *config.Telegram, dir string, emit func(Event)) error {
 	token, err := secrets.Get(dir, secrets.TelegramToken)
 	if err != nil {
@@ -92,22 +105,30 @@ func pairTelegram(ctx context.Context, t *config.Telegram, dir string, emit func
 	if err != nil {
 		return err
 	}
-	code := newCode()
-	emit(Event{Event: "code", Code: code, Bot: me.Username})
+	// Skip the backlog: offset -1 returns only the latest update.
+	var updates []tgUpdate
+	if err := telegramCall(ctx, token, "getUpdates", map[string]any{"offset": -1}, &updates); err != nil {
+		return err
+	}
+	var offset int64
+	for _, u := range updates {
+		offset = u.UpdateID + 1
+	}
+	code, issued := newCode(), time.Now().Unix()
+	emit(Event{Event: "code", Code: code, Bot: me.Username, URI: "https://t.me/" + me.Username + "?start=" + code})
 	emit(Event{Event: "waiting"})
 	attempts := map[int64]int{}
-	var offset int64
 	for {
-		var updates []tgUpdate
 		params := map[string]any{"offset": offset, "timeout": 25, "allowed_updates": []string{"message"}}
 		if err := telegramCall(ctx, token, "getUpdates", params, &updates); err != nil {
 			return err
 		}
 		for _, u := range updates {
 			offset = u.UpdateID + 1
-			if user := matchCode(u, code, attempts); user != nil {
-				// Confirm the offset so the relay does not see the code later.
-				_ = telegramCall(ctx, token, "getUpdates", map[string]any{"offset": offset}, &updates)
+			if user := matchCode(u, code, issued, attempts); user != nil {
+				// Confirm the offset so the relay does not see the code later;
+				// a failure only means the relay sees one stale message.
+				_ = telegramCall(ctx, token, "getUpdates", map[string]any{"offset": offset}, &[]tgUpdate{})
 				t.AllowedUserIDs = appendNew(t.AllowedUserIDs, user.ID)
 				_ = telegramCall(ctx, token, "sendMessage", map[string]any{"chat_id": user.ID, "text": "Paired with agent-relay."}, &struct{}{})
 				emit(Event{Event: "paired", UserID: user.ID, Name: user.Username})
@@ -117,17 +138,19 @@ func pairTelegram(ctx context.Context, t *config.Telegram, dir string, emit func
 	}
 }
 
-// matchCode returns the sender of a private message equal to code, counting
-// each sender's attempts and ignoring those past maxAttempts.
-func matchCode(u tgUpdate, code string, attempts map[int64]int) *telegramUser {
+// matchCode returns the sender of a private message, sent since issued, equal
+// to code (or /start code), counting each sender's attempts and ignoring
+// those past maxAttempts.
+func matchCode(u tgUpdate, code string, issued int64, attempts map[int64]int) *telegramUser {
 	m := u.Message
-	if m == nil || m.From == nil || m.Chat.Type != "private" {
+	if m == nil || m.From == nil || m.Chat.Type != "private" || m.Date < issued {
 		return nil
 	}
 	if attempts[m.From.ID]++; attempts[m.From.ID] > maxAttempts {
 		return nil
 	}
-	if subtle.ConstantTimeCompare([]byte(strings.ToUpper(strings.TrimSpace(m.Text))), []byte(code)) != 1 {
+	text := strings.ToUpper(strings.TrimSpace(strings.TrimPrefix(m.Text, "/start")))
+	if subtle.ConstantTimeCompare([]byte(text), []byte(code)) != 1 {
 		return nil
 	}
 	return m.From
@@ -135,7 +158,8 @@ func matchCode(u tgUpdate, code string, attempts map[int64]int) *telegramUser {
 
 // pairSignal links signal-cli (daemon without --account) to the user's phone
 // through JSON-RPC startLink/finishLink, and records the linked number as the
-// relay's account.
+// relay's account and its only allowed number: the owner talks to the relay
+// through Note to Self.
 func pairSignal(ctx context.Context, s *config.Signal, emit func(Event)) error {
 	c, err := dialSignal(ctx, s.Socket)
 	if err != nil {
@@ -156,7 +180,14 @@ func pairSignal(ctx context.Context, s *config.Signal, emit func(Event)) error {
 	if err := c.call("finishLink", map[string]any{"deviceLinkUri": link.URI, "deviceName": "agent-relay"}, &linked); err != nil {
 		return err
 	}
+	if linked.Number == "" {
+		return errors.New("setup: signal finishLink returned no number")
+	}
+	if s.Account != "" && s.Account != linked.Number {
+		return fmt.Errorf("setup: signal is configured for %s; linked %s instead", s.Account, linked.Number)
+	}
 	s.Account = linked.Number
-	emit(Event{Event: "paired", Name: linked.Number})
+	s.AllowedNumbers = appendNew(s.AllowedNumbers, linked.Number)
+	emit(Event{Event: "paired", Number: linked.Number})
 	return nil
 }

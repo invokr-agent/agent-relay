@@ -18,7 +18,10 @@ agent-relay setup --describe [client]      # descriptors as JSON ("setup_protoco
 agent-relay setup --apply telegram <answers.json
 ```
 
-`agent-relay setup --pair <client>` streams JSON events (`code`, `qr`, `waiting`, `paired`, `error`) for up to 5 minutes. Telegram shows a one-time 8-character code: the first user to send it to the bot in a private chat is allow-listed (single use, 5 attempts per user; stop the relay first, as Telegram serves one poller). Signal emits a `sgnl://linkdevice` URI to show as a QR code and links signal-cli (daemon without `--account`) to the scanning phone, recording its number as `account`.
+`agent-relay setup --pair <client>` streams JSON events for up to 5 minutes (schema in `setup.Event`): `code`, `qr`, `waiting`, `paired`, `error`.
+
+- **Telegram:** shows a one-time 8-character code and a `t.me/<bot>?start=<code>` link. The first user to send it to the bot in a private chat after it was issued is allow-listed (single use, 5 attempts per user, older messages skipped). Stop the relay first: Telegram serves `getUpdates` to one poller and pairing fails with a clear error on a conflict.
+- **Signal:** emits a `sgnl://linkdevice` URI to show as a QR code and links signal-cli (daemon without `--account`) to the scanning phone as a device. The linked number becomes `account` and the only allowed number: you talk to the relay through **Note to Self**; your other conversations are never relayed.
 
 `--apply` reads one JSON object of strings (at most 64 KiB; unknown keys refused) and answers `{"setup_protocol":1,"ok":true}` or `{"setup_protocol":1,"ok":false,"field":"<key>","error":"..."}` on stdout. Field `pattern`s are Go RE2 regexps matched against the trimmed answer; list answers replace the stored list. It validates the answers, verifies them (Telegram `getMe`, a signal-cli ping), merges them into the config, then stores secrets. Secrets are never printed. Front ends such as invokr drive `--describe`/`--apply`; the `setup` Go package holds the same logic without UI.
 

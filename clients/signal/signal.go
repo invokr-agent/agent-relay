@@ -38,6 +38,7 @@ var (
 // Client is a signal-cli JSON-RPC over UNIX socket client.
 type Client struct {
 	socketPath     string
+	account        string // set for a multi-account daemon; also Note to Self
 	allowedNumbers map[string]bool
 	conn           net.Conn
 	reader         *bufio.Scanner
@@ -53,8 +54,12 @@ type Client struct {
 // are served; an empty list admits nobody. Returns an error if the socket's
 // peer is not this user, is unreachable, or the ack is not received within
 // 5 seconds.
-func New(socketPath string, allowedNumbers []string) (*Client, error) {
-	return newWithDialer(socketPath, allowedNumbers, Dial)
+//
+// account names the relay's own number. It is required when signal-cli runs
+// without --account (as after pairing), and enables Note to Self: messages
+// the account's owner sends to themselves from the phone reach the relay.
+func New(socketPath, account string, allowedNumbers []string) (*Client, error) {
+	return newWithDialer(socketPath, account, allowedNumbers, Dial)
 }
 
 // Dial connects to signal-cli's socket and refuses a peer running as another
@@ -77,12 +82,12 @@ func Dial(network, path string) (net.Conn, error) {
 	return conn, nil
 }
 
-func newWithDialer(socketPath string, allowedNumbers []string, dialer func(string, string) (net.Conn, error)) (*Client, error) {
+func newWithDialer(socketPath, account string, allowedNumbers []string, dialer func(string, string) (net.Conn, error)) (*Client, error) {
 	allowed := make(map[string]bool, len(allowedNumbers))
 	for _, n := range allowedNumbers {
 		allowed[n] = true
 	}
-	c := &Client{socketPath: socketPath, allowedNumbers: allowed, dialer: dialer}
+	c := &Client{socketPath: socketPath, account: account, allowedNumbers: allowed, dialer: dialer}
 	conn, err := dialer("unix", socketPath)
 	if err != nil {
 		return nil, fmt.Errorf("signal: dial %s: %w", socketPath, err)
@@ -196,15 +201,48 @@ type rpcResult struct {
 	err    error
 }
 
+type signalMessage struct {
+	Message           string          `json:"message"`
+	GroupInfo         json.RawMessage `json:"groupInfo"`
+	DestinationNumber string          `json:"destinationNumber"`
+}
+
 type signalParams struct {
 	Envelope struct {
-		Source       string `json:"source"`
-		SourceNumber string `json:"sourceNumber"`
-		DataMessage  *struct {
-			Message   string          `json:"message"`
-			GroupInfo json.RawMessage `json:"groupInfo"`
-		} `json:"dataMessage"`
+		Source       string         `json:"source"`
+		SourceNumber string         `json:"sourceNumber"`
+		DataMessage  *signalMessage `json:"dataMessage"`
+		SyncMessage  *struct {
+			SentMessage *signalMessage `json:"sentMessage"`
+		} `json:"syncMessage"`
 	} `json:"envelope"`
+}
+
+// message returns the envelope's sender and text: a direct message, or a
+// Note to Self the account's owner sent from another device. Messages the
+// owner sends to anyone else, and group messages (a reply would go to the
+// sender as a DM), are skipped.
+func (c *Client) message(p signalParams) (source, text string, ok bool) {
+	env := p.Envelope
+	m := env.DataMessage
+	// Newer signal-cli puts a UUID in source and the number in sourceNumber.
+	source = cmp.Or(env.SourceNumber, env.Source)
+	if sync := env.SyncMessage; m == nil && sync != nil && sync.SentMessage != nil &&
+		c.account != "" && source == c.account && sync.SentMessage.DestinationNumber == c.account {
+		m = sync.SentMessage
+	}
+	if m == nil || m.Message == "" || m.GroupInfo != nil {
+		return "", "", false
+	}
+	return source, strings.TrimSpace(m.Message), true
+}
+
+// withAccount adds the account to params for a multi-account daemon.
+func (c *Client) withAccount(params map[string]any) map[string]any {
+	if c.account != "" {
+		params["account"] = c.account
+	}
+	return params
 }
 
 func (c *Client) dispatchLine(ctx context.Context, line []byte, out chan<- relay.Inbound) {
@@ -224,15 +262,8 @@ func (c *Client) dispatchLine(ctx context.Context, line []byte, out chan<- relay
 	if err := json.Unmarshal(notif.Params, &params); err != nil {
 		return
 	}
-	env := params.Envelope
-	// Group messages are skipped: a reply would go to the sender as a DM.
-	if env.DataMessage == nil || env.DataMessage.Message == "" || env.DataMessage.GroupInfo != nil {
-		return
-	}
-	// Newer signal-cli puts a UUID in source and the number in sourceNumber.
-	source := cmp.Or(env.SourceNumber, env.Source)
-	text := strings.TrimSpace(env.DataMessage.Message)
-	if c.handleApprovalReply(source, text) {
+	source, text, ok := c.message(params)
+	if !ok || c.handleApprovalReply(source, text) {
 		return
 	}
 	if !c.allowedNumbers[source] {
@@ -364,9 +395,9 @@ func rpcFrame(id int64, method string, params any) ([]byte, error) {
 	return append(raw, '\n'), nil
 }
 
-func (c *Client) rpc(ctx context.Context, method string, params any) (json.RawMessage, error) {
+func (c *Client) rpc(ctx context.Context, method string, params map[string]any) (json.RawMessage, error) {
 	id := c.nextID.Add(1)
-	raw, err := rpcFrame(id, method, params)
+	raw, err := rpcFrame(id, method, c.withAccount(params))
 	if err != nil {
 		return nil, err
 	}
@@ -396,7 +427,7 @@ func (c *Client) rpc(ctx context.Context, method string, params any) (json.RawMe
 
 func (c *Client) subscribe(_ context.Context) error {
 	id := c.nextID.Add(1)
-	raw, _ := rpcFrame(id, "subscribeReceive", map[string]any{})
+	raw, _ := rpcFrame(id, "subscribeReceive", c.withAccount(map[string]any{}))
 
 	c.mu.Lock()
 	conn := c.conn
