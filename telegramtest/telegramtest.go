@@ -140,6 +140,18 @@ type params struct {
 	} `json:"reply_markup"`
 }
 
+// buttons is the inline keyboard's callback data; an edit without one drops
+// the keyboard, as Telegram does.
+func (p params) buttons() []string {
+	var out []string
+	for _, row := range p.ReplyMarkup.InlineKeyboard {
+		for _, b := range row {
+			out = append(out, b.Data)
+		}
+	}
+	return out
+}
+
 func (s *Server) serve(w http.ResponseWriter, r *http.Request) {
 	method, ok := strings.CutPrefix(r.URL.Path, "/bot"+s.token+"/")
 	if !ok {
@@ -162,7 +174,7 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request) {
 		s.mu.Lock()
 		for _, m := range s.sent {
 			if m.MessageID == p.MessageID {
-				m.Text, m.Edited = p.Text, true
+				m.Text, m.Buttons, m.Edited = p.Text, p.buttons(), true
 			}
 		}
 		s.notify()
@@ -179,12 +191,7 @@ func (s *Server) record(p params) Message {
 	chatID, _ := p.ChatID.Int64()
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	m := &Message{ChatID: chatID, MessageID: int64(len(s.sent) + 1), Text: p.Text}
-	for _, row := range p.ReplyMarkup.InlineKeyboard {
-		for _, b := range row {
-			m.Buttons = append(m.Buttons, b.Data)
-		}
-	}
+	m := &Message{ChatID: chatID, MessageID: int64(len(s.sent) + 1), Text: p.Text, Buttons: p.buttons()}
 	s.sent = append(s.sent, m)
 	s.notify()
 	return *m
