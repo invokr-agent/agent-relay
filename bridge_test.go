@@ -12,7 +12,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/invokr-ai/acp"
+	"github.com/invokr-agent/acp"
 )
 
 // The bridge tests run a fake ACP agent as a real subprocess (this test binary,

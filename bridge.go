@@ -12,7 +12,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/invokr-ai/acp"
+	"github.com/invokr-agent/acp"
 )
 
 const (

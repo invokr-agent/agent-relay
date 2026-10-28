@@ -13,7 +13,7 @@ Chat with a coding agent from Telegram or Signal. messaging-kit is an [ACP](http
 ## Run
 
 ```
-go install github.com/invokr-ai/messaging-kit/cmd/messaging-kit@latest
+go install github.com/invokr-agent/messaging-kit/cmd/messaging-kit@latest
 messaging-kit -config messaging-kit.json
 ```
 

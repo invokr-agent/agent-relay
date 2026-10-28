@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/invokr-ai/messaging-kit"
+	"github.com/invokr-agent/messaging-kit"
 )
 
 type fakeTelegramServer struct {

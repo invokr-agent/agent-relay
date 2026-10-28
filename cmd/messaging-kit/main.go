@@ -28,9 +28,9 @@ import (
 	"os/signal"
 	"syscall"
 
-	messaging "github.com/invokr-ai/messaging-kit"
-	signalcli "github.com/invokr-ai/messaging-kit/signal"
-	"github.com/invokr-ai/messaging-kit/telegram"
+	messaging "github.com/invokr-agent/messaging-kit"
+	signalcli "github.com/invokr-agent/messaging-kit/signal"
+	"github.com/invokr-agent/messaging-kit/telegram"
 )
 
 type config struct {

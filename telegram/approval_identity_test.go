@@ -12,7 +12,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/invokr-ai/messaging-kit"
+	"github.com/invokr-agent/messaging-kit"
 )
 
 func TestApprovalIdentityAndCleanup(t *testing.T) {
