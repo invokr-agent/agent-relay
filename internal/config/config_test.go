@@ -130,3 +130,22 @@ func TestSaveRefusesLegacyToken(t *testing.T) {
 		t.Fatal("plaintext token saved")
 	}
 }
+
+func TestTelegramBaseURLOnlyLoopback(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	for url, ok := range map[string]bool{
+		"": true, "http://127.0.0.1:8081": true, "https://localhost": true, "http://[::1]:9": true,
+		"https://api.telegram.org": true, "https://evil.example": false, "ftp://127.0.0.1": false, "http://127.0.0.1.evil.example": false,
+	} {
+		if err := Save(path, Config{Telegram: &Telegram{BaseURL: url}}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := Load(path); (err == nil) != ok {
+			t.Errorf("%q: %v", url, err)
+		}
+	}
+	t.Setenv("AGENT_RELAY_TELEGRAM_BASE_URL", "http://10.0.0.1")
+	if _, err := Load(filepath.Join(t.TempDir(), "missing.json")); err == nil {
+		t.Error("env base URL not checked")
+	}
+}

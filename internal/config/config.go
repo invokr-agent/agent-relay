@@ -8,8 +8,10 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net/url"
 	"os"
 	"path/filepath"
+	"slices"
 	"sync"
 	"syscall"
 )
@@ -32,6 +34,7 @@ type Config struct {
 type Telegram struct {
 	AllowedUserIDs []int64 `json:"allowed_user_ids"`
 	AllowGroups    bool    `json:"allow_groups,omitempty"`
+	BaseURL        string  `json:"base_url,omitempty"` // a local fake Bot API, for tests
 	// Version 0 fields, read for migration only.
 	LegacyToken    string  `json:"token,omitempty"`
 	LegacyChatIDs  []int64 `json:"allowed_chat_ids,omitempty"`
@@ -67,7 +70,7 @@ func Load(path string) (Config, error) {
 	cfg := Config{Version: Version}
 	data, err := ReadFile(path, 0o022)
 	if errors.Is(err, os.ErrNotExist) {
-		return cfg, nil
+		return cfg, checkTelegramAPI(cfg)
 	}
 	if err != nil {
 		return cfg, err
@@ -83,7 +86,30 @@ func Load(path string) (Config, error) {
 		migrate(&cfg, path)
 	}
 	cfg.Version = Version
-	return cfg, nil
+	return cfg, checkTelegramAPI(cfg)
+}
+
+// TelegramAPI is the Bot API base URL: AGENT_RELAY_TELEGRAM_BASE_URL, else
+// telegram.base_url, else Telegram's own.
+func (c Config) TelegramAPI() string {
+	if v := os.Getenv("AGENT_RELAY_TELEGRAM_BASE_URL"); v != "" {
+		return v
+	}
+	if c.Telegram != nil && c.Telegram.BaseURL != "" {
+		return c.Telegram.BaseURL
+	}
+	return "https://api.telegram.org"
+}
+
+// checkTelegramAPI admits only Telegram itself or a loopback server: the
+// token travels in every request URL.
+func checkTelegramAPI(c Config) error {
+	u, err := url.Parse(c.TelegramAPI())
+	if err == nil && (u.String() == "https://api.telegram.org" || (u.Scheme == "http" || u.Scheme == "https") &&
+		slices.Contains([]string{"127.0.0.1", "::1", "localhost"}, u.Hostname())) {
+		return nil
+	}
+	return errors.New("config: telegram base_url must be http(s) on 127.0.0.1, ::1 or localhost")
 }
 
 var warnDropped sync.Once

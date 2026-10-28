@@ -96,9 +96,9 @@ func newFakeServer(t *testing.T, token string) *fakeTelegramServer {
 
 func newClient(t *testing.T, token string, allowedIDs []int64, allowGroups bool, f *fakeTelegramServer) *Client {
 	t.Helper()
-	c, err := newWithBaseURL(token, allowedIDs, allowGroups, f.srv.URL)
+	c, err := New(token, allowedIDs, allowGroups, f.srv.URL)
 	if err != nil {
-		t.Fatalf("newWithBaseURL: %v", err)
+		t.Fatalf("New: %v", err)
 	}
 	return c
 }
@@ -323,7 +323,7 @@ func TestAskApproval_EmptyApproverUnanswerable(t *testing.T) {
 func TestAPIErrorOmitsToken(t *testing.T) {
 	srv := httptest.NewServer(http.NotFoundHandler())
 	srv.Close()
-	c, err := newWithBaseURL("secret-token", nil, false, srv.URL)
+	c, err := New("secret-token", nil, false, srv.URL)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -384,7 +384,7 @@ func TestListen_RetryOn500(t *testing.T) {
 	})
 	srv := httptest.NewServer(mux)
 	defer srv.Close()
-	c, _ := newWithBaseURL(token, []int64{42}, false, srv.URL)
+	c, _ := New(token, []int64{42}, false, srv.URL)
 	c.httpClient = &http.Client{Timeout: 5 * time.Second}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -408,7 +408,7 @@ func TestListen_AbortOn401(t *testing.T) {
 	})
 	srv := httptest.NewServer(mux)
 	defer srv.Close()
-	c, _ := newWithBaseURL(token, nil, false, srv.URL)
+	c, _ := New(token, nil, false, srv.URL)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
@@ -424,7 +424,7 @@ func TestListen_AbortOn401(t *testing.T) {
 }
 
 func TestNew_EmptyToken(t *testing.T) {
-	_, err := New("", nil, false)
+	_, err := New("", nil, false, "")
 	if err == nil {
 		t.Fatal("expected error for empty token")
 	}

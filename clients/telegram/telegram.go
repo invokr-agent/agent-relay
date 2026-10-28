@@ -35,13 +35,10 @@ type Client struct {
 	pending        sync.Map
 }
 
-// New constructs a Client admitting messages from allowedUserIDs, in private
-// chats only unless allowGroups. An empty list admits nobody.
-func New(token string, allowedUserIDs []int64, allowGroups bool) (*Client, error) {
-	return newWithBaseURL(token, allowedUserIDs, allowGroups, "https://api.telegram.org")
-}
-
-func newWithBaseURL(token string, allowedUserIDs []int64, allowGroups bool, baseURL string) (*Client, error) {
+// New constructs a Client of the Bot API at baseURL admitting messages from
+// allowedUserIDs, in private chats only unless allowGroups. An empty list
+// admits nobody.
+func New(token string, allowedUserIDs []int64, allowGroups bool, baseURL string) (*Client, error) {
 	if strings.TrimSpace(token) == "" {
 		return nil, fmt.Errorf("telegram: token is required")
 	}
