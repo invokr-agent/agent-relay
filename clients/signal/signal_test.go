@@ -621,3 +621,42 @@ func TestNoteToSelf(t *testing.T) {
 		t.Fatal("account not sent")
 	}
 }
+
+// A "YES" the owner sends from the phone to someone else is neither relayed
+// nor taken as an answer to the owner's pending approval.
+func TestSyncToThirdPartyIgnored(t *testing.T) {
+	c := &Client{account: "+1me", allowedNumbers: map[string]bool{"+1me": true, "+1friend": true}}
+	pending := &kit.PendingApproval{ChatID: "+1me", Decision: make(chan bool, 1)}
+	c.pending.Store("1", pending)
+	out := make(chan relay.Inbound, 1)
+	c.dispatchLine(context.Background(), []byte(`{"jsonrpc":"2.0","method":"receive","params":{"envelope":{"sourceNumber":"+1me","syncMessage":{"sentMessage":{"message":"YES 1","destinationNumber":"+1friend"}}}}}`), out)
+	if len(out) != 0 || len(pending.Decision) != 0 {
+		t.Fatal("sync message to a third party dispatched or approved")
+	}
+}
+
+// A third party's "YES n" never answers another chat's request.
+func TestThirdPartyCannotApproveOtherChat(t *testing.T) {
+	c := &Client{allowedNumbers: map[string]bool{"+1me": true, "+1friend": true}}
+	pending := &kit.PendingApproval{ChatID: "+1me", Decision: make(chan bool, 1)}
+	c.pending.Store("1", pending)
+	if c.handleApprovalReply("+1friend", "YES 1") || c.handleApprovalReply("+1friend", "yes") || len(pending.Decision) != 0 {
+		t.Fatal("third party approved another chat's request")
+	}
+}
+
+func TestParseApprovalReply(t *testing.T) {
+	for in, want := range map[string][3]any{
+		"yes":           {true, "", true},
+		"No  req-1":     {false, "req-1", true},
+		"YeS 7":         {true, "7", true},
+		"YES 1 2":       {false, "", false},
+		"yes please do": {false, "", false},
+		"maybe":         {false, "", false},
+	} {
+		a, id, ok := parseApprovalReply(in)
+		if [3]any{a, id, ok} != want {
+			t.Errorf("%q = %v %q %v", in, a, id, ok)
+		}
+	}
+}

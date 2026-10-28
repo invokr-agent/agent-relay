@@ -24,6 +24,11 @@ jobs:
       # golangci-lint-action: the org only allows GitHub-owned and a few
       # listed actions.
       - run: make lint
+      - uses: goreleaser/goreleaser-action@a4f02ab5355a589de60d917a659ce617ed19b3de # v7.3.0
+        with:
+          args: check
+          distribution: goreleaser
+          version: v2.18.3
 
   test:
     runs-on: ubuntu-latest

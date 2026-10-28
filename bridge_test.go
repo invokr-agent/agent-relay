@@ -69,7 +69,7 @@ func (a *fakeAgent) Prompt(ctx context.Context, req acp.PromptRequest) (acp.Prom
 		return acp.PromptResponse{}, ctx.Err()
 	case "run":
 		perm, err := a.conn.RequestPermission(ctx, acp.RequestPermissionRequest{SessionID: req.SessionID,
-			ToolCall: acp.ToolCallUpdate{ToolCallID: "t1", Title: "rm -rf build", Kind: acp.ToolKindExecute},
+			ToolCall: acp.ToolCallUpdate{ToolCallID: "t1", Title: "rm -rf build", Kind: acp.ToolKindExecute, RawInput: json.RawMessage(`{"cmd":"rm -rf build"}`)},
 			Options: []acp.PermissionOption{{OptionID: "yes", Name: "Allow", Kind: acp.PermissionOptionKindAllowOnce},
 				{OptionID: "no", Name: "Deny", Kind: acp.PermissionOptionKindRejectOnce}}})
 		if err != nil {
@@ -199,7 +199,7 @@ func TestBridgeApprovalTimeoutDenies(t *testing.T) {
 	if err := json.Unmarshal([]byte(audit.String()), &entry); err != nil {
 		t.Fatal(err)
 	}
-	if entry["approver"] != "u1" || entry["tool"] != "rm -rf build" || entry["decision"] != "timeout" || entry["chat"] != "fake:me" {
+	if entry["approver"] != "u1" || entry["tool"] != "rm -rf build" || entry["decision"] != "timeout" || entry["chat"] != "fake:me" || entry["details"] == "" {
 		t.Fatalf("audit = %v", entry)
 	}
 }

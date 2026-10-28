@@ -28,21 +28,24 @@ const codeAlphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
 
 // Event is one step of a pairing, streamed to the front end as JSON lines:
 //
-//	{"event":"code","code":"ABCD2345","bot":"relaybot","uri":"https://t.me/relaybot?start=ABCD2345"}
+//	{"event":"start","setup_protocol":1}            always first
+//	{"event":"code","code":"ABCD2345","bot":"relaybot","uri":"https://t.me/relaybot?start=ABCD2345","expires_in":300}
 //	{"event":"qr","uri":"sgnl://linkdevice?..."}
 //	{"event":"waiting"}
 //	{"event":"paired","user_id":7,"name":"alice"}   Telegram
 //	{"event":"paired","number":"+15551234567"}      Signal
 //	{"event":"error","message":"..."}
 type Event struct {
-	Event   string `json:"event"`
-	Code    string `json:"code,omitempty"`
-	Bot     string `json:"bot,omitempty"`
-	URI     string `json:"uri,omitempty"`
-	UserID  int64  `json:"user_id,omitempty"`
-	Name    string `json:"name,omitempty"`
-	Number  string `json:"number,omitempty"`
-	Message string `json:"message,omitempty"`
+	Event     string `json:"event"`
+	Protocol  int    `json:"setup_protocol,omitempty"`
+	ExpiresIn int    `json:"expires_in,omitempty"` // seconds
+	Code      string `json:"code,omitempty"`
+	Bot       string `json:"bot,omitempty"`
+	URI       string `json:"uri,omitempty"`
+	UserID    int64  `json:"user_id,omitempty"`
+	Name      string `json:"name,omitempty"`
+	Number    string `json:"number,omitempty"`
+	Message   string `json:"message,omitempty"`
 }
 
 // Pair runs client's pairing and saves the result to the config at path:
@@ -105,7 +108,9 @@ func pairTelegram(ctx context.Context, t *config.Telegram, dir string, emit func
 		offset = u.UpdateID + 1
 	}
 	code, issued := newCode(), time.Now().Unix()
-	emit(Event{Event: "code", Code: code, Bot: me.Username, URI: "https://t.me/" + me.Username + "?start=" + code})
+	deadline, _ := ctx.Deadline()
+	emit(Event{Event: "code", Code: code, Bot: me.Username, URI: "https://t.me/" + me.Username + "?start=" + code,
+		ExpiresIn: int(time.Until(deadline).Seconds())})
 	emit(Event{Event: "waiting"})
 	attempts := map[int64]int{}
 	for {
@@ -151,6 +156,9 @@ func matchCode(u tgapi.Update, code string, issued int64, attempts map[int64]int
 // relay's account and its only allowed number: the owner talks to the relay
 // through Note to Self.
 func pairSignal(ctx context.Context, s *config.Signal, emit func(Event)) error {
+	if s.Account != "" {
+		return fmt.Errorf("setup: signal is already linked as %s; clear account to link another phone", s.Account)
+	}
 	call, closeConn, err := kit.SignalRPC(ctx, s.Socket)
 	if err != nil {
 		return fmt.Errorf("setup: %w", err)
@@ -172,9 +180,6 @@ func pairSignal(ctx context.Context, s *config.Signal, emit func(Event)) error {
 	}
 	if linked.Number == "" {
 		return errors.New("setup: signal finishLink returned no number")
-	}
-	if s.Account != "" && s.Account != linked.Number {
-		return fmt.Errorf("setup: signal is configured for %s; linked %s instead", s.Account, linked.Number)
 	}
 	s.Account = linked.Number
 	s.AllowedNumbers = appendNew(s.AllowedNumbers, linked.Number)

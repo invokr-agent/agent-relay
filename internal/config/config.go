@@ -7,8 +7,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"path/filepath"
+	"sync"
 	"syscall"
 )
 
@@ -31,14 +33,16 @@ type Telegram struct {
 	AllowedUserIDs []int64 `json:"allowed_user_ids"`
 	AllowGroups    bool    `json:"allow_groups,omitempty"`
 	// Version 0 fields, read for migration only.
-	LegacyToken   string  `json:"token,omitempty"`
-	LegacyChatIDs []int64 `json:"allowed_chat_ids,omitempty"`
+	LegacyToken    string  `json:"token,omitempty"`
+	LegacyChatIDs  []int64 `json:"allowed_chat_ids,omitempty"`
+	LegacyAllowAll bool    `json:"allow_all,omitempty"`
 }
 
 type Signal struct {
 	Socket         string   `json:"socket"`
 	Account        string   `json:"account,omitempty"`
 	AllowedNumbers []string `json:"allowed_numbers"`
+	LegacyAllowAll bool     `json:"allow_all,omitempty"` // version 0, read for migration only
 }
 
 // Dir is $XDG_CONFIG_HOME/agent-relay, defaulting to ~/.config/agent-relay.
@@ -75,16 +79,34 @@ func Load(path string) (Config, error) {
 	if cfg.Version > Version {
 		return cfg, fmt.Errorf("%s: config version %d is newer than this agent-relay (%d)", path, cfg.Version, Version)
 	}
-	if t := cfg.Telegram; t != nil && cfg.Version == 0 {
-		for _, id := range t.LegacyChatIDs {
-			if id > 0 {
-				t.AllowedUserIDs = append(t.AllowedUserIDs, id)
-			}
-		}
-		t.LegacyChatIDs = nil
+	if cfg.Version == 0 {
+		migrate(&cfg, path)
 	}
 	cfg.Version = Version
 	return cfg, nil
+}
+
+var warnDropped sync.Once
+
+func migrate(cfg *Config, path string) {
+	dropped := false
+	if s := cfg.Signal; s != nil {
+		dropped, s.LegacyAllowAll = s.LegacyAllowAll, false
+	}
+	if t := cfg.Telegram; t != nil {
+		for _, id := range t.LegacyChatIDs {
+			if dropped = dropped || id <= 0; id > 0 {
+				t.AllowedUserIDs = append(t.AllowedUserIDs, id)
+			}
+		}
+		dropped = dropped || t.LegacyAllowAll
+		t.LegacyChatIDs, t.LegacyAllowAll = nil, false
+	}
+	if dropped {
+		warnDropped.Do(func() {
+			slog.Warn("config: version 0 allow_all and group chat IDs are no longer honored; allow-list users (and set allow_groups) instead", "config", path)
+		})
+	}
 }
 
 // Save writes cfg atomically at 0600 in a 0700 directory.

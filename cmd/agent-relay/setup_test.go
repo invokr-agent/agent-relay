@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -56,8 +57,25 @@ func TestSetupApplyReportsJSON(t *testing.T) {
 			t.Fatalf("%.20q: %s", in, out.String())
 		}
 	}
-	if runSetup([]string{"--describe", "irc"}, nil, &bytes.Buffer{}) == nil {
-		t.Fatal("unknown client described")
+}
+
+// Every JSON-mode failure is one document (or event stream) on stdout, and
+// marked reported so main prints nothing to stderr.
+func TestSetupJSONFailures(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	for _, args := range [][]string{{"--describe", "irc"}, {"--describe", "--bogus"}, {"--apply"}, {"--apply", "irc"}} {
+		var out bytes.Buffer
+		err := runSetup(args, strings.NewReader("{}"), &out)
+		var got map[string]any
+		if !errors.As(err, new(reported)) || json.Unmarshal(out.Bytes(), &got) != nil || got["ok"] != false || got["error"] == nil {
+			t.Errorf("%v: %v, %s", args, err, out.String())
+		}
+	}
+	var out bytes.Buffer
+	err := runSetup([]string{"--pair", "irc"}, nil, &out)
+	lines := strings.Split(strings.TrimSpace(out.String()), "\n")
+	if !errors.As(err, new(reported)) || len(lines) != 2 || lines[0] != `{"event":"start","setup_protocol":1}` || !strings.Contains(lines[1], `"event":"error"`) {
+		t.Fatalf("pair: %v, %s", err, out.String())
 	}
 }
 
@@ -94,7 +112,7 @@ func TestSetupTimeoutExcludesPrompts(t *testing.T) {
 	}()
 	defer func(d time.Duration) { verifyTimeout = d }(verifyTimeout)
 	verifyTimeout = 500 * time.Millisecond
-	in := slowReader{strings.NewReader(sock + strings.Repeat("\n", 40))}
+	in := slowReader{strings.NewReader(sock + "\n\n\na" + strings.Repeat("\n", 40))}
 	if err := runSetup([]string{"signal"}, in, io.Discard); err != nil {
 		t.Fatal(err)
 	}

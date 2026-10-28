@@ -29,57 +29,81 @@ var verifyTimeout = 30 * time.Second
 //	setup --apply <client>      answers JSON on stdin; verify, write config, store secrets
 //	setup --pair <client>       pair, streaming JSON events
 //	setup [client]              interactive prompts
+//
+// The JSON modes report every failure, flag errors included, on stdout only
+// and return a reported error, which main does not print again.
 func runSetup(args []string, stdin io.Reader, stdout io.Writer) error {
 	fs := flag.NewFlagSet("setup", flag.ContinueOnError)
 	path := fs.String("config", config.Path(), "config file")
 	describe := fs.Bool("describe", false, "print client descriptors as JSON")
 	apply := fs.String("apply", "", "apply answers JSON from stdin for `client`")
 	pair := fs.String("pair", "", "pair `client`, streaming JSON events")
-	if err := fs.Parse(args); err != nil {
-		return err
+	mode := jsonMode(args)
+	if mode != "" {
+		fs.SetOutput(io.Discard)
 	}
+	err := fs.Parse(args)
 	enc := json.NewEncoder(stdout)
-	switch {
-	case *describe:
-		d, err := setup.Describe(fs.Arg(0))
+	switch mode {
+	case "":
 		if err != nil {
 			return err
 		}
-		return enc.Encode(map[string]any{"setup_protocol": setup.Protocol, "clients": d})
-	case *apply != "":
-		return applyJSON(*path, *apply, stdin, enc)
-	case *pair != "":
-		err := setup.Pair(context.Background(), *path, *pair, func(e setup.Event) { _ = enc.Encode(e) })
+		return interactive(*path, fs.Arg(0), stdin, stdout)
+	case "pair":
+		_ = enc.Encode(setup.Event{Event: "start", Protocol: setup.Protocol})
+		if err == nil {
+			err = setup.Pair(context.Background(), *path, *pair, func(e setup.Event) { _ = enc.Encode(e) })
+		}
 		if err != nil {
 			_ = enc.Encode(setup.Event{Event: "error", Message: err.Error()})
+			return reported{err}
 		}
-		return err
+		return nil
 	}
-	return interactive(*path, fs.Arg(0), stdin, stdout)
-}
-
-// applyJSON answers --apply on stdout: {"setup_protocol":1,"ok":true} or
-// {"setup_protocol":1,"ok":false,"field":key,"error":message}.
-func applyJSON(path, client string, stdin io.Reader, enc *json.Encoder) error {
-	ctx, cancel := context.WithTimeout(context.Background(), verifyTimeout)
-	defer cancel()
-	var answers setup.Answers
-	dec := json.NewDecoder(io.LimitReader(stdin, maxAnswers))
-	err := dec.Decode(&answers)
-	if err != nil || dec.More() {
-		err = errors.New("setup: answers must be one JSON object of strings, at most 64 KiB")
-	} else {
-		err = setup.Apply(ctx, path, client, answers)
+	reply := map[string]any{"setup_protocol": setup.Protocol}
+	if err == nil && *describe {
+		reply["clients"], err = setup.Describe(*path, fs.Arg(0))
+	} else if err == nil {
+		err = applyJSON(*path, *apply, stdin)
 	}
-	reply := map[string]any{"setup_protocol": setup.Protocol, "ok": err == nil}
+	reply["ok"] = err == nil
 	if err != nil {
+		delete(reply, "clients")
 		reply["error"] = err.Error()
 		if fe, ok := errors.AsType[*setup.FieldError](err); ok {
 			reply["field"] = fe.Key
 		}
+		err = reported{err}
 	}
 	_ = enc.Encode(reply)
 	return err
+}
+
+// reported marks an error already written to stdout as JSON.
+type reported struct{ error }
+
+// jsonMode names the JSON mode args select, before parsing them, so a flag
+// error can be reported in that mode's shape.
+func jsonMode(args []string) string {
+	for _, a := range args {
+		name, _, _ := strings.Cut(strings.TrimLeft(a, "-"), "=")
+		if strings.HasPrefix(a, "-") && (name == "describe" || name == "apply" || name == "pair") {
+			return name
+		}
+	}
+	return ""
+}
+
+func applyJSON(path, client string, stdin io.Reader) error {
+	ctx, cancel := context.WithTimeout(context.Background(), verifyTimeout)
+	defer cancel()
+	var answers setup.Answers
+	dec := json.NewDecoder(io.LimitReader(stdin, maxAnswers))
+	if err := dec.Decode(&answers); err != nil || dec.More() {
+		return errors.New("setup: answers must be one JSON object of strings, at most 64 KiB")
+	}
+	return setup.Apply(ctx, path, client, answers)
 }
 
 // interactive asks for each field of one client on plain lines; secrets are
@@ -90,7 +114,7 @@ func interactive(path, client string, in io.Reader, out io.Writer) error {
 		_, _ = fmt.Fprint(out, "Client (telegram, signal): ")
 		client = readLine(in)
 	}
-	d, err := setup.Describe(client)
+	d, err := setup.Describe(path, client)
 	if err != nil {
 		return err
 	}
@@ -100,7 +124,9 @@ func interactive(path, client string, in io.Reader, out io.Writer) error {
 	answers := setup.Answers{}
 	for _, f := range d[0].Fields {
 		_, _ = fmt.Fprintf(out, "%s (%s): ", f.Label, f.Help)
-		answers[f.Key] = readAnswer(in, out, f.Secret)
+		if v := readAnswer(in, out, f.Secret); v != "" {
+			answers[f.Key] = v
+		}
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), verifyTimeout)
 	defer cancel()

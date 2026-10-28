@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -43,6 +44,8 @@ func getMe(w http.ResponseWriter, _ string) {
 }
 
 func TestValidate(t *testing.T) {
+	keyring.MockInit()
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	for _, tc := range []struct {
 		a  Answers
 		ok bool
@@ -52,7 +55,7 @@ func TestValidate(t *testing.T) {
 		{Answers{"token": "nope"}, false},
 		{Answers{"token": token, "allowed_user_ids": "1, x"}, false},
 	} {
-		err := validate("telegram", tc.a)
+		err := validate(config.Path(), "telegram", tc.a)
 		if (err == nil) != tc.ok {
 			t.Errorf("%v: %v", tc.a, err)
 		}
@@ -60,8 +63,13 @@ func TestValidate(t *testing.T) {
 			t.Error("error echoes the token")
 		}
 	}
-	if _, err := Describe("irc"); err == nil {
+	if _, err := Describe("", "irc"); err == nil {
 		t.Fatal("unknown client described")
+	}
+	for in, ok := range map[string]bool{"": true, "+1": true, "+1, +2,+3": true, "1": false, "+1,": false, "+1 +2": false} {
+		if err := validate("", "signal", Answers{"socket": "s", "allowed_numbers": in}); (err == nil) != ok {
+			t.Errorf("allowed_numbers %q: %v", in, err)
+		}
 	}
 }
 
@@ -70,7 +78,7 @@ func TestApplyTelegram(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	fakeTelegram(t, getMe)
 	path := config.Path()
-	err := Apply(context.Background(), path, "telegram", Answers{"token": token, "allowed_user_ids": "7, 8", "agent": "invokr acp"})
+	err := Apply(context.Background(), path, "telegram", Answers{"token": token, "allowed_user_ids": "7, 8, 7", "agent": "invokr acp"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -86,6 +94,25 @@ func TestApplyTelegram(t *testing.T) {
 	}
 	if Apply(context.Background(), path, "telegram", Answers{"token": "9" + token}) == nil {
 		t.Fatal("rejected token applied")
+	}
+	if d, _ := Describe(path, "telegram"); !d[0].Fields[0].Stored || d[0].Fields[0].Required {
+		t.Fatalf("stored token described as %+v", d[0].Fields[0])
+	}
+	if err := Apply(context.Background(), path, "telegram", Answers{"allowed_user_ids": ""}); err != nil {
+		t.Fatal(err)
+	}
+	if cfg, _ = config.Load(path); len(cfg.Telegram.AllowedUserIDs) != 0 || len(cfg.Agent) != 2 {
+		t.Fatalf("empty list kept: %+v", cfg)
+	}
+}
+
+func TestApplyRequiresAgent(t *testing.T) {
+	keyring.MockInit()
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	fakeTelegram(t, getMe)
+	fe, ok := errors.AsType[*FieldError](Apply(context.Background(), config.Path(), "telegram", Answers{"token": token}))
+	if !ok || fe.Key != "agent" {
+		t.Fatalf("err = %v", fe)
 	}
 }
 
@@ -129,15 +156,15 @@ func TestApplySignal(t *testing.T) {
 	sock := fakeSignal(t, func(string) []string {
 		return []string{`{"jsonrpc":"2.0","method":"receive","params":{}}`, `{"jsonrpc":"2.0","id":1,"result":{"version":"0.13"}}`}
 	})
-	err := Apply(context.Background(), config.Path(), "signal", Answers{"socket": sock, "allowed_numbers": "+1555"})
+	err := Apply(context.Background(), config.Path(), "signal", Answers{"socket": sock, "allowed_numbers": "+1555, +1666,+1555", "agent": "a"})
 	if err != nil {
 		t.Fatal(err)
 	}
 	cfg, _ := config.Load(config.Path())
-	if cfg.Signal.Socket != sock || cfg.Signal.AllowedNumbers[0] != "+1555" {
+	if cfg.Signal.Socket != sock || !slices.Equal(cfg.Signal.AllowedNumbers, []string{"+1555", "+1666"}) {
 		t.Fatalf("config = %+v", cfg.Signal)
 	}
-	if verify(context.Background(), "signal", Answers{"socket": "/nonexistent"}) == nil {
+	if verify(context.Background(), "", "signal", Answers{"socket": "/nonexistent"}) == nil {
 		t.Fatal("missing socket verified")
 	}
 }
@@ -165,7 +192,7 @@ func TestApplyRejectsUnknownAndOverflow(t *testing.T) {
 	fakeTelegram(t, getMe)
 	for key, a := range map[string]Answers{
 		"bogus":            {"token": token, "bogus": "s3cret"},
-		"allowed_user_ids": {"token": token, "allowed_user_ids": "99999999999999999999"},
+		"allowed_user_ids": {"token": token, "allowed_user_ids": "99999999999999999999", "agent": "a"},
 	} {
 		err := Apply(context.Background(), config.Path(), "telegram", a)
 		fe, ok := errors.AsType[*FieldError](err)
@@ -176,9 +203,9 @@ func TestApplyRejectsUnknownAndOverflow(t *testing.T) {
 }
 
 func TestDescribeReturnsCopies(t *testing.T) {
-	d, _ := Describe("telegram")
+	d, _ := Describe("", "telegram")
 	d[0].Fields[0].Key = "mutated"
-	if again, _ := Describe("telegram"); again[0].Fields[0].Key != "token" {
+	if again, _ := Describe("", "telegram"); again[0].Fields[0].Key != "token" {
 		t.Fatal("Describe exposed package state")
 	}
 }
@@ -187,7 +214,7 @@ func TestSignalNoResponseTimesOut(t *testing.T) {
 	sock := fakeSignal(t, func(string) []string { return nil })
 	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 	defer cancel()
-	if verify(ctx, "signal", Answers{"socket": sock}) == nil {
+	if verify(ctx, "", "signal", Answers{"socket": sock}) == nil {
 		t.Fatal("silent signal-cli verified")
 	}
 }

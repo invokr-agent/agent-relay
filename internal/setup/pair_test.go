@@ -98,7 +98,7 @@ func TestPairTelegram(t *testing.T) {
 	if ids := cfg.Telegram.AllowedUserIDs; len(ids) != 1 || ids[0] != 7 || len(events) != 3 || events[2].UserID != 7 {
 		t.Fatalf("allowed %v, events %v", ids, events)
 	}
-	if events[0].URI != "https://t.me/relaybot?start="+code {
+	if events[0].URI != "https://t.me/relaybot?start="+code || events[0].ExpiresIn < 290 {
 		t.Fatalf("link = %q", events[0].URI)
 	}
 }
@@ -170,8 +170,8 @@ func TestPairSignalFailures(t *testing.T) {
 		"rpc error":     {`{"jsonrpc":"2.0","id":2,"error":{"code":-1,"message":"timeout"}}`, ""},
 		"other account": {`{"jsonrpc":"2.0","id":2,"result":{"number":"+1555"}}`, "+1999"},
 	} {
-		if _, err := signalPairing(t, tc[0], tc[1]); err == nil {
-			t.Errorf("%s: paired", name)
+		if uri, err := signalPairing(t, tc[0], tc[1]); err == nil || (tc[1] != "" && uri != "") {
+			t.Errorf("%s: paired (uri %q)", name, uri)
 		}
 	}
 }

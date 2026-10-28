@@ -27,6 +27,7 @@ type Field struct {
 	Secret   bool   `json:"secret,omitempty"`
 	Required bool   `json:"required,omitempty"`
 	Pattern  string `json:"pattern,omitempty"` // Go RE2 regexp the trimmed answer must match
+	Stored   bool   `json:"stored,omitempty"`  // a secret is already stored; an empty answer keeps it
 }
 
 // Descriptor tells a front end what to ask for one client.
@@ -53,7 +54,7 @@ var descriptors = []Descriptor{
 		Fields: []Field{
 			{Key: "socket", Label: "signal-cli socket", Help: "Unix socket of signal-cli in JSON-RPC daemon mode", Required: true},
 			{Key: "account", Label: "Signal account", Help: "the relay's number, e.g. +15551234567", Pattern: `^(\+[0-9]+)?$`},
-			{Key: "allowed_numbers", Label: "Allowed numbers", Help: "comma-separated; replaces the list", Pattern: `^[0-9+, ]*$`},
+			{Key: "allowed_numbers", Label: "Allowed numbers", Help: "comma-separated; replaces the list", Pattern: `^(\+[0-9]+)(, *\+[0-9]+)*$|^$`},
 			agentField,
 		}},
 }
@@ -63,12 +64,17 @@ type FieldError struct{ Key, Problem string }
 
 func (e *FieldError) Error() string { return "setup: " + e.Key + " " + e.Problem }
 
-// Describe returns copies of every client's descriptor, or only client's.
-func Describe(client string) ([]Descriptor, error) {
+// Describe returns copies of every client's descriptor, or only client's,
+// for the config at path.
+func Describe(path, client string) ([]Descriptor, error) {
+	_, err := secrets.Get(filepath.Dir(path), secrets.TelegramToken)
 	var out []Descriptor
 	for _, d := range descriptors {
 		if client == "" || d.Client == client {
 			d.Fields = slices.Clone(d.Fields)
+			if d.Client == "telegram" && err == nil {
+				d.Fields[0].Required, d.Fields[0].Stored = false, true
+			}
 			out = append(out, d)
 		}
 	}
@@ -80,8 +86,8 @@ func Describe(client string) ([]Descriptor, error) {
 
 // validate checks trimmed answers against client's fields; unknown keys are
 // refused.
-func validate(client string, a Answers) error {
-	d, err := Describe(client)
+func validate(path, client string, a Answers) error {
+	d, err := Describe(path, client)
 	if err != nil {
 		return err
 	}
@@ -104,9 +110,13 @@ func validate(client string, a Answers) error {
 
 // verify checks the answers work: Telegram's token with getMe, Signal's
 // socket with a ping.
-func verify(ctx context.Context, client string, a Answers) error {
+func verify(ctx context.Context, path, client string, a Answers) error {
 	if client == "telegram" {
-		_, err := telegramMe(ctx, a["token"])
+		token := a["token"]
+		if token == "" {
+			token, _ = secrets.Get(filepath.Dir(path), secrets.TelegramToken)
+		}
+		_, err := telegramMe(ctx, token)
 		return err
 	}
 	return signalPing(ctx, a["socket"])
@@ -121,10 +131,10 @@ func Apply(ctx context.Context, path, client string, a Answers) error {
 		trimmed[k] = strings.TrimSpace(v)
 	}
 	a = trimmed
-	if err := validate(client, a); err != nil {
+	if err := validate(path, client, a); err != nil {
 		return err
 	}
-	if err := verify(ctx, client, a); err != nil {
+	if err := verify(ctx, path, client, a); err != nil {
 		return err
 	}
 	cfg, err := secrets.LoadConfig(path)
@@ -133,6 +143,8 @@ func Apply(ctx context.Context, path, client string, a Answers) error {
 	}
 	if argv := strings.Fields(a["agent"]); len(argv) > 0 {
 		cfg.Agent = argv
+	} else if len(cfg.Agent) == 0 {
+		return &FieldError{"agent", "is required"}
 	}
 	switch client {
 	case "telegram":
@@ -147,9 +159,9 @@ func applyTelegram(cfg *config.Config, path string, a Answers) error {
 	if cfg.Telegram == nil {
 		cfg.Telegram = &config.Telegram{}
 	}
-	if list := splitList(a["allowed_user_ids"]); len(list) > 0 {
-		cfg.Telegram.AllowedUserIDs = nil
-		for _, s := range list {
+	if list, ok := a["allowed_user_ids"]; ok {
+		cfg.Telegram.AllowedUserIDs = []int64{}
+		for _, s := range splitList(list) {
 			id, err := strconv.ParseInt(s, 10, 64)
 			if err != nil {
 				return &FieldError{"allowed_user_ids", "is not valid"}
@@ -157,7 +169,7 @@ func applyTelegram(cfg *config.Config, path string, a Answers) error {
 			cfg.Telegram.AllowedUserIDs = appendNew(cfg.Telegram.AllowedUserIDs, id)
 		}
 	}
-	if err := config.Save(path, *cfg); err != nil {
+	if err := config.Save(path, *cfg); err != nil || a["token"] == "" {
 		return err
 	}
 	_, err := secrets.Set(filepath.Dir(path), secrets.TelegramToken, a["token"])
@@ -172,8 +184,11 @@ func applySignal(cfg *config.Config, a Answers) {
 	if a["account"] != "" {
 		cfg.Signal.Account = a["account"]
 	}
-	if list := splitList(a["allowed_numbers"]); len(list) > 0 {
-		cfg.Signal.AllowedNumbers = slices.Compact(list)
+	if list, ok := a["allowed_numbers"]; ok {
+		cfg.Signal.AllowedNumbers = []string{}
+		for _, n := range splitList(list) {
+			cfg.Signal.AllowedNumbers = appendNew(cfg.Signal.AllowedNumbers, n)
+		}
 	}
 }
 

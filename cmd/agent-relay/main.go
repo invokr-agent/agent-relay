@@ -53,7 +53,9 @@ func main() {
 			err = runService(os.Args[2:])
 		}
 		if err != nil {
-			fmt.Fprintln(os.Stderr, err)
+			if !errors.As(err, new(reported)) {
+				fmt.Fprintln(os.Stderr, err)
+			}
 			os.Exit(1)
 		}
 		return

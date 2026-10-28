@@ -18,12 +18,14 @@ agent-relay setup --describe [client]      # descriptors as JSON ("setup_protoco
 agent-relay setup --apply telegram <answers.json
 ```
 
-`agent-relay setup --pair <client>` streams JSON events for up to 5 minutes (schema in `setup.Event`): `code`, `qr`, `waiting`, `paired`, `error`.
+`agent-relay setup --pair <client>` streams JSON lines for up to 5 minutes (schema in `internal/setup.Event`): first `{"event":"start","setup_protocol":1}`, then `code` (with `expires_in` seconds), `qr`, `waiting`, and finally `paired` or `error`.
 
 - **Telegram:** shows a one-time 8-character code and a `t.me/<bot>?start=<code>` link. The first user to send it to the bot in a private chat after it was issued is allow-listed (single use, 5 attempts per user, older messages skipped). Stop the relay first: Telegram serves `getUpdates` to one poller and pairing fails with a clear error on a conflict.
-- **Signal:** emits a `sgnl://linkdevice` URI to show as a QR code and links signal-cli (daemon without `--account`) to the scanning phone as a device. The linked number becomes `account` and the only allowed number: you talk to the relay through **Note to Self**; your other conversations are never relayed.
+- **Signal:** emits a `sgnl://linkdevice` URI to show as a QR code and links signal-cli (daemon without `--account`) to the scanning phone as a device; refused once an `account` is configured. The linked number becomes `account` and the only allowed number: you talk to the relay through **Note to Self**; your other conversations are never relayed.
 
-`--apply` reads one JSON object of strings (at most 64 KiB; unknown keys refused) and answers `{"setup_protocol":1,"ok":true}` or `{"setup_protocol":1,"ok":false,"field":"<key>","error":"..."}` on stdout. Field `pattern`s are Go RE2 regexps matched against the trimmed answer; list answers replace the stored list. It validates the answers, verifies them (Telegram `getMe`, a signal-cli ping), merges them into the config, then stores secrets. Secrets are never printed. Front ends such as invokr drive `--describe`/`--apply`; the internal `setup` package holds the same logic without UI.
+**Protocol.** `--describe` and `--apply` write exactly one JSON document to stdout, `--pair` an event stream; this holds for every failure too (bad flags, unknown client), and nothing is repeated on stderr. Exit status is 0 on success, 1 on any error. Documents carry `"setup_protocol":1` and `"ok"`; a failure adds `"error"` and, for a bad answer, `"field":"<key>"`. `--describe` lists `clients`; a secret field already stored has `"stored":true` and may be left out.
+
+`--apply` reads one JSON object of strings (at most 64 KiB; unknown keys refused). Field `pattern`s are Go RE2 regexps matched against the trimmed answer; a list answer replaces the stored list (`""` clears it), an omitted key keeps it. `agent` is required until the config has one. It validates the answers, verifies them (Telegram `getMe`, a signal-cli ping), merges them into the config, then stores secrets. Secrets are never printed. Front ends such as invokr drive `--describe`/`--apply`; the internal `setup` package holds the same logic without UI.
 
 ## Run
 

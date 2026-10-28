@@ -27,13 +27,13 @@ func TestSystemdInstallUninstall(t *testing.T) {
 	calls := recordCmds(t, "")
 	t.Setenv("PATH", "/usr/bin:/opt/$x")
 	path := filepath.Join(t.TempDir(), "systemd/user/agent-relay.service")
-	content := unit(`/bin/agent 100% "relay"`, "/c/config.json")
+	content := unit(`/bin/agent 100% "relay"`, "/c/$HOME.json")
 	if err := systemd("install", path, content); err != nil {
 		t.Fatal(err)
 	}
 	data, _ := os.ReadFile(path)
-	for _, want := range []string{`ExecStart="/bin/agent 100%% \"relay\"" -config "/c/config.json"`,
-		`Environment="PATH=/usr/bin:/opt/$$x"`, "NoNewPrivileges=yes", "Restart=on-failure"} {
+	for _, want := range []string{`ExecStart="/bin/agent 100%% \"relay\"" -config "/c/$$HOME.json"`,
+		`Environment="PATH=/usr/bin:/opt/$x"`, "NoNewPrivileges=yes", "Restart=on-failure"} {
 		if !strings.Contains(string(data), want) {
 			t.Fatalf("unit lacks %q:\n%s", want, data)
 		}

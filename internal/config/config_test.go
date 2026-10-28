@@ -1,8 +1,11 @@
 package config
 
 import (
+	"bytes"
+	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -29,12 +32,19 @@ func TestLoadMigratesVersion0(t *testing.T) {
 	if err := os.WriteFile(path, []byte(v0), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	var logs bytes.Buffer
+	defer slog.SetDefault(slog.Default())
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
+	_, _ = Load(path)
 	cfg, err := Load(path)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if tg := cfg.Telegram; len(tg.AllowedUserIDs) != 1 || tg.AllowedUserIDs[0] != 42 || tg.LegacyToken != "tok" || cfg.Version != Version {
 		t.Fatalf("migrated = %+v %+v", cfg, tg)
+	}
+	if n := strings.Count(logs.String(), "level=WARN"); n != 1 {
+		t.Fatalf("%d warnings: %s", n, logs.String())
 	}
 }
 

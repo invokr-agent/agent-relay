@@ -20,6 +20,7 @@ const (
 	approvalTimeout = 2 * time.Minute
 	typingRefresh   = 4 * time.Second
 	rateWindow      = time.Minute
+	auditDetailsMax = 1 << 10
 )
 
 // Bridge connects chat clients to one ACP agent. Each chat gets its own
@@ -316,22 +317,29 @@ func (b *Bridge) RequestPermission(ctx context.Context, req acp.RequestPermissio
 	askCtx, cancel := context.WithTimeout(ctx, approvalTimeout)
 	defer cancel()
 	tool := cmp.Or(req.ToolCall.Title, req.ToolCall.Name, string(req.ToolCall.ToolCallID))
-	approved, err := c.t.AskApproval(askCtx, c.id, ApprovalRequest{
+	ar := ApprovalRequest{
 		// The counter alone: Telegram caps callback_data at 64 bytes.
 		ID:       fmt.Sprint(b.approvals.Add(1)),
 		Tool:     tool,
 		Summary:  string(req.ToolCall.Kind),
 		Details:  string(req.ToolCall.RawInput),
 		Approver: approver,
-	})
+	}
+	approved, err := c.t.AskApproval(askCtx, c.id, ar)
 	// A timeout is a denial: an unanswered prompt never lets the tool run.
 	timedOut := err != nil && ctx.Err() == nil && errors.Is(err, context.DeadlineExceeded)
-	if timedOut {
+	decision := "denied"
+	switch {
+	case timedOut:
+		decision = "timeout"
 		_ = c.t.Send(ctx, c.id, "approval timed out; denied")
-	} else if err != nil {
+	case err != nil:
+		b.audit(c, ar, "error: "+err.Error())
 		return acp.RequestPermissionResponse{}, err
+	case approved:
+		decision = "approved"
 	}
-	b.audit(c, approver, tool, approved, timedOut)
+	b.audit(c, ar, decision)
 	kinds := []acp.PermissionOptionKind{acp.PermissionOptionKindRejectOnce, acp.PermissionOptionKindRejectAlways}
 	if approved {
 		kinds = []acp.PermissionOptionKind{acp.PermissionOptionKindAllowOnce, acp.PermissionOptionKindAllowAlways}
@@ -347,17 +355,16 @@ func (b *Bridge) RequestPermission(ctx context.Context, req acp.RequestPermissio
 	return acp.RequestPermissionResponse{Outcome: acp.RequestPermissionOutcome{Cancelled: &acp.RequestPermissionOutcomeCancelled{}}}, nil
 }
 
-func (b *Bridge) audit(c *chat, approver, tool string, approved, timedOut bool) {
+func (b *Bridge) audit(c *chat, req ApprovalRequest, decision string) {
 	if b.Audit == nil {
 		return
 	}
-	decision := "denied"
-	if timedOut {
-		decision = "timeout"
-	} else if approved {
-		decision = "approved"
+	details := req.Details
+	if len(details) > auditDetailsMax {
+		details = strings.ToValidUTF8(details[:auditDetailsMax], "") + "…"
 	}
-	b.Audit.Info("approval", "chat", c.key, "approver", approver, "tool", tool, "decision", decision)
+	b.Audit.Info("approval", "chat", c.key, "approver", req.Approver, "tool", req.Tool,
+		"summary", req.Summary, "details", details, "decision", decision)
 }
 
 func (b *Bridge) typing(ctx context.Context, c *chat) (stop func()) {

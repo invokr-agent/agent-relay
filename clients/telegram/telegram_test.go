@@ -302,6 +302,23 @@ func TestAskApproval_CallbackFromOtherGroupMemberIgnored(t *testing.T) {
 	}
 }
 
+// Without an Approver no one may answer, the requester included.
+func TestAskApproval_EmptyApproverUnanswerable(t *testing.T) {
+	f := newFakeServer(t, "tok6d")
+	c := newClient(t, "tok6d", []int64{requester}, false, f)
+	ctx, cancel := context.WithTimeout(context.Background(), 150*time.Millisecond)
+	defer cancel()
+	_, _ = c.Listen(ctx)
+	go func() {
+		time.Sleep(20 * time.Millisecond)
+		f.callbackChan <- callbackInject{reqID: "req-5", approved: true, from: requester}
+	}()
+	approved, err := c.AskApproval(ctx, "111", relay.ApprovalRequest{ID: "req-5"})
+	if approved || err == nil {
+		t.Fatalf("callback decided an approval without approver: %v, %v", approved, err)
+	}
+}
+
 // A transport error must not carry the request URL, which holds the token.
 func TestAPIErrorOmitsToken(t *testing.T) {
 	srv := httptest.NewServer(http.NotFoundHandler())

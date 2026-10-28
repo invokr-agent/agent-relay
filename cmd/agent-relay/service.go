@@ -70,12 +70,13 @@ func warnKeyringOnly(cfgPath string) {
 		"if the service cannot read it, set AGENT_RELAY_TELEGRAM_TOKEN in the service environment or store it in secrets.json beside the config")
 }
 
-// sdQuote quotes s for a systemd unit line: C-style quoting, then % and $
-// doubled so neither is expanded.
+// sdQuote quotes s for a systemd unit line: C-style quoting with % doubled.
+// Only ExecStart expands $, so execArg doubles it too.
 func sdQuote(s string) string {
-	s = strings.NewReplacer(`\`, `\\`, `"`, `\"`, "%", "%%", "$", "$$").Replace(s)
-	return `"` + s + `"`
+	return `"` + strings.NewReplacer(`\`, `\\`, `"`, `\"`, "%", "%%").Replace(s) + `"`
 }
+
+func execArg(s string) string { return strings.ReplaceAll(sdQuote(s), "$", "$$") }
 
 func unit(exe, cfg string) string {
 	return fmt.Sprintf(`[Unit]
@@ -90,7 +91,7 @@ NoNewPrivileges=yes
 
 [Install]
 WantedBy=default.target
-`, sdQuote(exe), sdQuote(cfg), sdQuote("PATH="+os.Getenv("PATH")))
+`, execArg(exe), execArg(cfg), sdQuote("PATH="+os.Getenv("PATH")))
 }
 
 func plist(exe, cfg, log string) string {
