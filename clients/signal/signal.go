@@ -48,7 +48,7 @@ type Client struct {
 	pending        sync.Map // map[request ID]*kit.PendingApproval
 	pendingRPC     sync.Map // map[int64]chan rpcMessage
 	dialer         func(network, address string) (net.Conn, error)
-	connDone       chan struct{} // closed when a DialRPC connection ends
+	connDone       chan struct{} // closed when a dialRPC connection ends
 }
 
 // New dials the UNIX socket and sends subscribeReceive. Only allowedNumbers
@@ -60,13 +60,13 @@ type Client struct {
 // without --account (as after pairing), and enables Note to Self: messages
 // the account's owner sends to themselves from the phone reach the relay.
 func New(socketPath, account string, allowedNumbers []string) (*Client, error) {
-	return newWithDialer(socketPath, account, allowedNumbers, Dial)
+	return newWithDialer(socketPath, account, allowedNumbers, dial)
 }
 
-// Dial connects to signal-cli's socket and refuses a peer running as another
+// dial connects to signal-cli's socket and refuses a peer running as another
 // user, which could impersonate signal-cli. The check is on the connected
 // peer, not the path, so swapping the socket file cannot race it.
-func Dial(network, path string) (net.Conn, error) {
+func dial(network, path string) (net.Conn, error) {
 	conn, err := (&net.Dialer{Timeout: dialTimeout}).Dial(network, path)
 	if err != nil {
 		return nil, err
@@ -101,12 +101,15 @@ func newWithDialer(socketPath, account string, allowedNumbers []string, dialer f
 	return c, nil
 }
 
-// DialRPC connects for one-off JSON-RPC calls, without subscribing to
-// messages. The connection ends with ctx or Close.
-func DialRPC(ctx context.Context, socketPath string) (*Client, error) {
-	conn, err := Dial("unix", socketPath)
+func init() { kit.SignalRPC = dialRPC }
+
+// dialRPC connects for one-off JSON-RPC calls, without subscribing to
+// messages. The connection ends with ctx or Close. Calls have no timeout
+// beyond ctx.
+func dialRPC(ctx context.Context, socketPath string) (func(string, map[string]any, any) error, func() error, error) {
+	conn, err := dial("unix", socketPath)
 	if err != nil {
-		return nil, fmt.Errorf("signal: dial %s: %w", socketPath, err)
+		return nil, nil, fmt.Errorf("signal: dial %s: %w", socketPath, err)
 	}
 	c := &Client{socketPath: socketPath, conn: conn, connDone: make(chan struct{})}
 	stop := context.AfterFunc(ctx, func() { _ = conn.Close() })
@@ -119,21 +122,15 @@ func DialRPC(ctx context.Context, socketPath string) (*Client, error) {
 			c.dispatchLine(ctx, scanner.Bytes(), nil)
 		}
 	}()
-	return c, nil
-}
-
-// Call sends one request and decodes its result into result. Unlike the
-// relay's own calls it has no timeout beyond ctx.
-func (c *Client) Call(ctx context.Context, method string, params map[string]any, result any) error {
-	raw, err := c.call(ctx, method, params)
-	if err != nil {
-		return err
+	call := func(method string, params map[string]any, result any) error {
+		raw, err := c.call(ctx, method, params)
+		if err != nil {
+			return err
+		}
+		return json.Unmarshal(raw, result)
 	}
-	return json.Unmarshal(raw, result)
+	return call, conn.Close, nil
 }
-
-// Close ends the connection.
-func (c *Client) Close() error { return c.conn.Close() }
 
 func (c *Client) Name() string { return "signal" }
 
@@ -194,8 +191,7 @@ func (c *Client) readConn(ctx context.Context, scanner *bufio.Scanner, buffered 
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
-		line := scanner.Bytes()
-		c.dispatchLine(ctx, line, out)
+		c.dispatchLine(ctx, scanner.Bytes(), out)
 	}
 	if err := scanner.Err(); err != nil {
 		return fmt.Errorf("signal: read: %w", err)
@@ -333,18 +329,16 @@ func (c *Client) pendingForReply(source, requestID string) *kit.PendingApproval 
 		return value.(*kit.PendingApproval)
 	}
 	var match *kit.PendingApproval
+	n := 0
 	c.pending.Range(func(_, value any) bool {
-		pending := value.(*kit.PendingApproval)
-		if pending.ChatID != source {
-			return true
+		if p := value.(*kit.PendingApproval); p.ChatID == source {
+			match, n = p, n+1
 		}
-		if match != nil {
-			match = nil
-			return false
-		}
-		match = pending
-		return true
+		return n < 2
 	})
+	if n > 1 {
+		return nil
+	}
 	return match
 }
 

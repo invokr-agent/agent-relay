@@ -77,3 +77,7 @@ func AwaitApproval(ctx context.Context, pending *sync.Map, client, chatID, sende
 		return false, ctx.Err()
 	}
 }
+
+// SignalRPC dials signal-cli for one-off JSON-RPC calls bound to ctx, which
+// setup makes without the Signal client exporting them. clients/signal sets it.
+var SignalRPC func(ctx context.Context, socket string) (call func(method string, params map[string]any, result any) error, closeConn func() error, err error)

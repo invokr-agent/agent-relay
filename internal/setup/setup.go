@@ -78,9 +78,9 @@ func Describe(client string) ([]Descriptor, error) {
 	return out, nil
 }
 
-// Validate checks trimmed answers against client's fields; unknown keys are
+// validate checks trimmed answers against client's fields; unknown keys are
 // refused.
-func Validate(client string, a Answers) error {
+func validate(client string, a Answers) error {
 	d, err := Describe(client)
 	if err != nil {
 		return err
@@ -102,9 +102,9 @@ func Validate(client string, a Answers) error {
 	return nil
 }
 
-// Verify checks the answers work: Telegram's token with getMe, Signal's
+// verify checks the answers work: Telegram's token with getMe, Signal's
 // socket with a ping.
-func Verify(ctx context.Context, client string, a Answers) error {
+func verify(ctx context.Context, client string, a Answers) error {
 	if client == "telegram" {
 		_, err := telegramMe(ctx, a["token"])
 		return err
@@ -121,10 +121,10 @@ func Apply(ctx context.Context, path, client string, a Answers) error {
 		trimmed[k] = strings.TrimSpace(v)
 	}
 	a = trimmed
-	if err := Validate(client, a); err != nil {
+	if err := validate(client, a); err != nil {
 		return err
 	}
-	if err := Verify(ctx, client, a); err != nil {
+	if err := verify(ctx, client, a); err != nil {
 		return err
 	}
 	cfg, err := secrets.LoadConfig(path)

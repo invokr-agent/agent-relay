@@ -52,7 +52,7 @@ func TestValidate(t *testing.T) {
 		{Answers{"token": "nope"}, false},
 		{Answers{"token": token, "allowed_user_ids": "1, x"}, false},
 	} {
-		err := Validate("telegram", tc.a)
+		err := validate("telegram", tc.a)
 		if (err == nil) != tc.ok {
 			t.Errorf("%v: %v", tc.a, err)
 		}
@@ -137,7 +137,7 @@ func TestApplySignal(t *testing.T) {
 	if cfg.Signal.Socket != sock || cfg.Signal.AllowedNumbers[0] != "+1555" {
 		t.Fatalf("config = %+v", cfg.Signal)
 	}
-	if Verify(context.Background(), "signal", Answers{"socket": "/nonexistent"}) == nil {
+	if verify(context.Background(), "signal", Answers{"socket": "/nonexistent"}) == nil {
 		t.Fatal("missing socket verified")
 	}
 }
@@ -187,7 +187,7 @@ func TestSignalNoResponseTimesOut(t *testing.T) {
 	sock := fakeSignal(t, func(string) []string { return nil })
 	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 	defer cancel()
-	if Verify(ctx, "signal", Answers{"socket": sock}) == nil {
+	if verify(ctx, "signal", Answers{"socket": sock}) == nil {
 		t.Fatal("silent signal-cli verified")
 	}
 }

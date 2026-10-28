@@ -10,14 +10,15 @@ import (
 	"strings"
 	"time"
 
-	signalcli "github.com/invokr-agent/agent-relay/clients/signal"
-	"github.com/invokr-agent/agent-relay/clients/telegram"
+	_ "github.com/invokr-agent/agent-relay/clients/signal"
 	"github.com/invokr-agent/agent-relay/internal/config"
+	"github.com/invokr-agent/agent-relay/internal/kit"
 	"github.com/invokr-agent/agent-relay/internal/secrets"
+	"github.com/invokr-agent/agent-relay/internal/tgapi"
 )
 
-// PairTTL bounds a pairing: the Telegram code and the Signal link expire.
-const PairTTL = 5 * time.Minute
+// pairTTL bounds a pairing: the Telegram code and the Signal link expire.
+const pairTTL = 5 * time.Minute
 
 // maxAttempts caps the code guesses one Telegram user gets per pairing.
 const maxAttempts = 5
@@ -48,7 +49,7 @@ type Event struct {
 // Telegram allow-lists the user who sends the one-time code to the bot in a
 // private chat; Signal links signal-cli as a device of the scanning phone.
 func Pair(ctx context.Context, path, client string, emit func(Event)) error {
-	ctx, cancel := context.WithTimeout(ctx, PairTTL)
+	ctx, cancel := context.WithTimeout(ctx, pairTTL)
 	defer cancel()
 	cfg, err := secrets.LoadConfig(path)
 	if err != nil {
@@ -95,7 +96,7 @@ func pairTelegram(ctx context.Context, t *config.Telegram, dir string, emit func
 		return err
 	}
 	// Skip the backlog: offset -1 returns only the latest update.
-	var updates []telegram.Update
+	var updates []tgapi.Update
 	if err := telegramCall(ctx, token, "getUpdates", map[string]any{"offset": -1}, &updates); err != nil {
 		return err
 	}
@@ -117,7 +118,7 @@ func pairTelegram(ctx context.Context, t *config.Telegram, dir string, emit func
 			if user := matchCode(u, code, issued, attempts); user != nil {
 				// Confirm the offset so the relay does not see the code later;
 				// a failure only means the relay sees one stale message.
-				_ = telegramCall(ctx, token, "getUpdates", map[string]any{"offset": offset}, &[]telegram.Update{})
+				_ = telegramCall(ctx, token, "getUpdates", map[string]any{"offset": offset}, &[]tgapi.Update{})
 				t.AllowedUserIDs = appendNew(t.AllowedUserIDs, user.ID)
 				_ = telegramCall(ctx, token, "sendMessage", map[string]any{"chat_id": user.ID, "text": "Paired with agent-relay."}, &struct{}{})
 				emit(Event{Event: "paired", UserID: user.ID, Name: user.Username})
@@ -130,7 +131,7 @@ func pairTelegram(ctx context.Context, t *config.Telegram, dir string, emit func
 // matchCode returns the sender of a private message, sent since issued, equal
 // to code (or /start code), counting each sender's attempts and ignoring
 // those past maxAttempts.
-func matchCode(u telegram.Update, code string, issued int64, attempts map[int64]int) *telegram.User {
+func matchCode(u tgapi.Update, code string, issued int64, attempts map[int64]int) *tgapi.User {
 	m := u.Message
 	if m == nil || m.From == nil || m.Chat.Type != "private" || m.Date < issued {
 		return nil
@@ -150,15 +151,15 @@ func matchCode(u telegram.Update, code string, issued int64, attempts map[int64]
 // relay's account and its only allowed number: the owner talks to the relay
 // through Note to Self.
 func pairSignal(ctx context.Context, s *config.Signal, emit func(Event)) error {
-	c, err := signalcli.DialRPC(ctx, s.Socket)
+	call, closeConn, err := kit.SignalRPC(ctx, s.Socket)
 	if err != nil {
 		return fmt.Errorf("setup: %w", err)
 	}
-	defer func() { _ = c.Close() }()
+	defer func() { _ = closeConn() }()
 	var link struct {
 		URI string `json:"deviceLinkUri"`
 	}
-	if err := c.Call(ctx, "startLink", map[string]any{}, &link); err != nil {
+	if err := call("startLink", map[string]any{}, &link); err != nil {
 		return fmt.Errorf("setup: %w", err)
 	}
 	emit(Event{Event: "qr", URI: link.URI})
@@ -166,7 +167,7 @@ func pairSignal(ctx context.Context, s *config.Signal, emit func(Event)) error {
 	var linked struct {
 		Number string `json:"number"`
 	}
-	if err := c.Call(ctx, "finishLink", map[string]any{"deviceLinkUri": link.URI, "deviceName": "agent-relay"}, &linked); err != nil {
+	if err := call("finishLink", map[string]any{"deviceLinkUri": link.URI, "deviceName": "agent-relay"}, &linked); err != nil {
 		return fmt.Errorf("setup: %w", err)
 	}
 	if linked.Number == "" {

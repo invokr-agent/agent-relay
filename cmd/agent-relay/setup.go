@@ -14,7 +14,7 @@ import (
 	"golang.org/x/term"
 
 	"github.com/invokr-agent/agent-relay/internal/config"
-	"github.com/invokr-agent/agent-relay/setup"
+	"github.com/invokr-agent/agent-relay/internal/setup"
 )
 
 // maxAnswers bounds the answers JSON read from stdin.

@@ -192,7 +192,7 @@ func TestDialChecksPeer(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer func() { _ = l.Close() }()
-	conn, err := Dial("unix", path)
+	conn, err := dial("unix", path)
 	if err != nil {
 		t.Fatalf("own socket refused: %v", err)
 	}
@@ -202,7 +202,7 @@ func TestDialChecksPeer(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer func() { _ = tcp.Close() }()
-	if _, err := Dial("tcp", tcp.Addr().String()); err == nil {
+	if _, err := dial("tcp", tcp.Addr().String()); err == nil {
 		t.Fatal("non-Unix peer accepted")
 	}
 }
