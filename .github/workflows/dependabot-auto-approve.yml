@@ -1,0 +1,60 @@
+name: Dependabot auto-approve
+
+on: pull_request
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  approve:
+    # Dependabot secrets are only exposed to runs Dependabot triggered, so a
+    # human push to a Dependabot PR would fail at token minting; skip it instead.
+    if: github.event.pull_request.user.login == 'dependabot[bot]' && github.actor == 'dependabot[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - id: metadata
+        uses: dependabot/fetch-metadata@25dd0e34f4fe68f24cc83900b1fe3fe149efef98 # v3.1.0
+
+      # Majors stay manual. For grouped PRs update-type is the highest bump in the group.
+      - id: app-token
+        if: steps.metadata.outputs.update-type == 'version-update:semver-patch' || steps.metadata.outputs.update-type == 'version-update:semver-minor'
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+        with:
+          app-id: ${{ secrets.APPROVER_APP_ID }}
+          private-key: ${{ secrets.APPROVER_PRIVATE_KEY }}
+
+      # The approval comes from the approver app so it counts toward the ruleset;
+      # auto-merge then waits for the required lint/test checks.
+      - if: steps.app-token.outputs.token
+        run: |
+          gh pr review --approve "$PR_URL"
+          gh pr merge --auto --squash "$PR_URL"
+        env:
+          PR_URL: ${{ github.event.pull_request.html_url }}
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+
+  # A push by anyone else means the PR is no longer what was approved. Dismiss
+  # every approval and turn off auto-merge so a human has to review it again.
+  # Uses GITHUB_TOKEN since the app secrets are not exposed to these runs.
+  revoke:
+    if: github.event.pull_request.user.login == 'dependabot[bot]' && github.actor != 'dependabot[bot]'
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: write
+    steps:
+      - run: |
+          if [ "$(gh pr view "$PR_URL" --json autoMergeRequest -q '.autoMergeRequest != null')" = true ]; then
+            gh pr merge --disable-auto "$PR_URL"
+          fi
+          gh api --paginate "repos/$REPO/pulls/$PR/reviews" -q '.[] | select(.state == "APPROVED") | .id' |
+            while read -r id; do
+              gh api -X PUT "repos/$REPO/pulls/$PR/reviews/$id/dismissals" \
+                -f event=DISMISS -f message="Pushed to by $ACTOR; needs human review."
+            done
+        env:
+          PR_URL: ${{ github.event.pull_request.html_url }}
+          PR: ${{ github.event.pull_request.number }}
+          REPO: ${{ github.repository }}
+          ACTOR: ${{ github.actor }}
+          GH_TOKEN: ${{ github.token }}
