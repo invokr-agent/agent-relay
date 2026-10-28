@@ -288,7 +288,7 @@ func TestAskApproval_YES(t *testing.T) {
 		writeNotification(server, "+1test", "YES")
 	}()
 
-	approved, err := c.AskApproval(ctx, "+1test", messaging.ApprovalRequest{
+	approved, err := c.AskApproval(ctx, "+1test", relay.ApprovalRequest{
 		ID: "req-yes", Tool: "shell", Summary: "test",
 	})
 	if err != nil {
@@ -316,7 +316,7 @@ func TestAskApproval_RegistersBeforeSendingPrompt(t *testing.T) {
 		writeRPCResponse(server, msg["id"].(float64))
 	}()
 
-	approved, err := c.AskApproval(ctx, "+1test", messaging.ApprovalRequest{
+	approved, err := c.AskApproval(ctx, "+1test", relay.ApprovalRequest{
 		ID: "req-fast", Tool: "shell", Summary: "test",
 	})
 	if err != nil {
@@ -329,8 +329,8 @@ func TestAskApproval_RegistersBeforeSendingPrompt(t *testing.T) {
 
 func TestApprovalRepliesRouteByRequestID(t *testing.T) {
 	c := &Client{}
-	first := &messaging.PendingApproval{ChatID: "+1test", Decision: make(chan bool, 1)}
-	second := &messaging.PendingApproval{ChatID: "+1test", Decision: make(chan bool, 1)}
+	first := &relay.PendingApproval{ChatID: "+1test", Decision: make(chan bool, 1)}
+	second := &relay.PendingApproval{ChatID: "+1test", Decision: make(chan bool, 1)}
 	c.pending.Store("req-1", first)
 	c.pending.Store("req-2", second)
 
@@ -377,7 +377,7 @@ func TestAskApproval_NO(t *testing.T) {
 		writeNotification(server, "+1test", "NO")
 	}()
 
-	approved, err := c.AskApproval(ctx, "+1test", messaging.ApprovalRequest{
+	approved, err := c.AskApproval(ctx, "+1test", relay.ApprovalRequest{
 		ID: "req-no", Tool: "shell", Summary: "test",
 	})
 	if err != nil {
@@ -398,7 +398,7 @@ func TestAskApproval_Cancel(t *testing.T) {
 		scanner := bufio.NewScanner(server)
 		scanner.Scan()
 	}()
-	approved, err := c.AskApproval(ctx, "+1test", messaging.ApprovalRequest{ID: "req-cancel"})
+	approved, err := c.AskApproval(ctx, "+1test", relay.ApprovalRequest{ID: "req-cancel"})
 	if err == nil {
 		t.Fatal("expected error")
 	}
@@ -465,7 +465,7 @@ loop:
 func TestReadConn_CleanEOFReturnsError(t *testing.T) {
 	server, client := net.Pipe()
 	c := &Client{}
-	out := make(chan messaging.Inbound, 1)
+	out := make(chan relay.Inbound, 1)
 	done := make(chan error, 1)
 	go func() {
 		done <- c.readConn(context.Background(), bufio.NewScanner(client), nil, out)
@@ -532,7 +532,7 @@ func TestListen_ReconnectsAfterCleanEOF(t *testing.T) {
 }
 
 // Compile-time check.
-var _ messaging.Transport = (*Client)(nil)
+var _ relay.Transport = (*Client)(nil)
 
 func TestAllowed(t *testing.T) {
 	c := &Client{allowedNumbers: map[string]bool{"+1test": true}}

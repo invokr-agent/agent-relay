@@ -28,7 +28,7 @@ import (
 	"os/signal"
 	"syscall"
 
-	messaging "github.com/invokr-agent/agent-relay"
+	"github.com/invokr-agent/agent-relay"
 	signalcli "github.com/invokr-agent/agent-relay/signal"
 	"github.com/invokr-agent/agent-relay/telegram"
 )
@@ -68,7 +68,7 @@ func run(path string, logger *slog.Logger) error {
 	if err != nil {
 		return err
 	}
-	store, err := messaging.NewStore(cfg.Store)
+	store, err := relay.NewStore(cfg.Store)
 	if err != nil {
 		return err
 	}
@@ -76,7 +76,7 @@ func run(path string, logger *slog.Logger) error {
 	defer stop()
 	agent := exec.CommandContext(ctx, cfg.Agent[0], cfg.Agent[1:]...)
 	agent.Stderr = os.Stderr
-	bridge := &messaging.Bridge{Store: store, Transports: transports, Logger: logger, Cwd: cfg.Cwd}
+	bridge := &relay.Bridge{Store: store, Transports: transports, Logger: logger, Cwd: cfg.Cwd}
 	return bridge.Run(ctx, agent)
 }
 
@@ -108,8 +108,8 @@ func load(path string) (config, error) {
 
 // buildTransports starts each configured transport. One without an allowlist
 // or an explicit allow_all refuses to start: fail closed, never open to all.
-func buildTransports(cfg config, logger *slog.Logger) ([]messaging.Transport, error) {
-	var out []messaging.Transport
+func buildTransports(cfg config, logger *slog.Logger) ([]relay.Transport, error) {
+	var out []relay.Transport
 	if t := cfg.Telegram; t.Token != "" {
 		if len(t.AllowedChatIDs) == 0 && !t.AllowAll {
 			return nil, errors.New("telegram: refusing to start with no allowed_chat_ids and allow_all unset")

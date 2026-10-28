@@ -21,7 +21,7 @@ func TestApprovalIdentityAndCleanup(t *testing.T) {
 			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 			defer cancel()
 			var client *Client
-			replacement := &messaging.PendingApproval{ChatID: "222", Decision: make(chan bool, 1)}
+			replacement := &relay.PendingApproval{ChatID: "222", Decision: make(chan bool, 1)}
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				if !strings.HasSuffix(r.URL.Path, "/sendMessage") {
 					_, _ = fmt.Fprint(w, `{"ok":true,"result":true}`)
@@ -41,7 +41,7 @@ func TestApprovalIdentityAndCleanup(t *testing.T) {
 					}
 				case "duplicate":
 					for _, peer := range []string{"111", "222"} {
-						approved, err := client.AskApproval(ctx, peer, messaging.ApprovalRequest{ID: "request"})
+						approved, err := client.AskApproval(ctx, peer, relay.ApprovalRequest{ID: "request"})
 						if approved || err == nil {
 							t.Error("duplicate request accepted")
 						}
@@ -71,7 +71,7 @@ func TestApprovalIdentityAndCleanup(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			approved, err := client.AskApproval(ctx, "111", messaging.ApprovalRequest{ID: " request "})
+			approved, err := client.AskApproval(ctx, "111", relay.ApprovalRequest{ID: " request "})
 			switch scenario {
 			case "wrong peer", "duplicate":
 				if !approved || err != nil {
@@ -100,7 +100,7 @@ func TestApprovalIdentityAndCleanup(t *testing.T) {
 
 func TestApprovalRejectsEmptyIDBeforeSend(t *testing.T) {
 	client := &Client{}
-	approved, err := client.AskApproval(context.Background(), "111", messaging.ApprovalRequest{ID: "  "})
+	approved, err := client.AskApproval(context.Background(), "111", relay.ApprovalRequest{ID: "  "})
 	if approved || err == nil {
 		t.Fatalf("empty ID accepted: %v, %v", approved, err)
 	}
@@ -130,7 +130,7 @@ func TestUnacceptedCallbacksNeverClaimDecision(t *testing.T) {
 				t.Fatal(err)
 			}
 			if scenario == "wrong peer" {
-				client.pending.Store("request", &messaging.PendingApproval{ChatID: "111", Decision: make(chan bool, 1)})
+				client.pending.Store("request", &relay.PendingApproval{ChatID: "111", Decision: make(chan bool, 1)})
 			}
 			client.dispatchUpdate(context.Background(), tgUpdate{CallbackQuery: &tgCallbackQuery{
 				ID: "callback", Data: "approve:request", Message: tgMessage{MessageID: 42, Chat: tgChat{ID: 222}},

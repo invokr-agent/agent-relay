@@ -32,7 +32,7 @@ type Client struct {
 	preAckLines    [][]byte
 	mu             sync.Mutex
 	nextID         atomic.Int64
-	pending        sync.Map // map[request ID]*messaging.PendingApproval
+	pending        sync.Map // map[request ID]*relay.PendingApproval
 	pendingRPC     sync.Map // map[int64]chan rpcResult
 	dialer         func(network, address string) (net.Conn, error)
 }
@@ -66,15 +66,15 @@ func (c *Client) Name() string { return "signal" }
 
 // Allowed reports whether the number is on the allowlist (fail closed).
 func (c *Client) Allowed(chatID string) bool {
-	return messaging.Allowed(c.allowAll, c.allowedNumbers, chatID)
+	return relay.Allowed(c.allowAll, c.allowedNumbers, chatID)
 }
 
 // Listen reads JSON-RPC notifications from the socket.
-func (c *Client) Listen(ctx context.Context) (<-chan messaging.Inbound, error) {
-	return messaging.StartListen(ctx, c.readLoop)
+func (c *Client) Listen(ctx context.Context) (<-chan relay.Inbound, error) {
+	return relay.StartListen(ctx, c.readLoop)
 }
 
-func (c *Client) readLoop(ctx context.Context, out chan<- messaging.Inbound) {
+func (c *Client) readLoop(ctx context.Context, out chan<- relay.Inbound) {
 	defer close(out)
 	backoff := reconnectWait
 	for {
@@ -122,7 +122,7 @@ func (c *Client) dropConn(conn net.Conn) {
 // waitReconnect backs off then attempts a reconnect, resetting backoff on success.
 // It returns false if ctx was cancelled during the wait.
 func (c *Client) waitReconnect(ctx context.Context, backoff *time.Duration) bool {
-	if !messaging.WaitBackoff(ctx, backoff, maxBackoff) {
+	if !relay.WaitBackoff(ctx, backoff, maxBackoff) {
 		return false
 	}
 	if err := c.reconnect(ctx); err == nil {
@@ -131,7 +131,7 @@ func (c *Client) waitReconnect(ctx context.Context, backoff *time.Duration) bool
 	return true
 }
 
-func (c *Client) readConn(ctx context.Context, scanner *bufio.Scanner, buffered [][]byte, out chan<- messaging.Inbound) error {
+func (c *Client) readConn(ctx context.Context, scanner *bufio.Scanner, buffered [][]byte, out chan<- relay.Inbound) error {
 	for _, line := range buffered {
 		c.dispatchLine(ctx, line, out)
 	}
@@ -175,7 +175,7 @@ type signalParams struct {
 	} `json:"envelope"`
 }
 
-func (c *Client) dispatchLine(ctx context.Context, line []byte, out chan<- messaging.Inbound) {
+func (c *Client) dispatchLine(ctx context.Context, line []byte, out chan<- relay.Inbound) {
 	var notif rpcNotification
 	if err := json.Unmarshal(line, &notif); err != nil {
 		return
@@ -204,7 +204,7 @@ func (c *Client) dispatchLine(ctx context.Context, line []byte, out chan<- messa
 		return
 	}
 	select {
-	case out <- messaging.Inbound{ChatID: env.Source, Sender: env.Source, Text: text}:
+	case out <- relay.Inbound{ChatID: env.Source, Sender: env.Source, Text: text}:
 	case <-ctx.Done():
 	}
 }
@@ -243,17 +243,17 @@ func parseApprovalReply(text string) (bool, string, bool) {
 	return verb == "YES", requestID, true
 }
 
-func (c *Client) pendingForReply(source, requestID string) *messaging.PendingApproval {
+func (c *Client) pendingForReply(source, requestID string) *relay.PendingApproval {
 	if requestID != "" {
 		value, ok := c.pending.Load(requestID)
-		if !ok || value.(*messaging.PendingApproval).ChatID != source {
+		if !ok || value.(*relay.PendingApproval).ChatID != source {
 			return nil
 		}
-		return value.(*messaging.PendingApproval)
+		return value.(*relay.PendingApproval)
 	}
-	var match *messaging.PendingApproval
+	var match *relay.PendingApproval
 	c.pending.Range(func(_, value any) bool {
-		pending := value.(*messaging.PendingApproval)
+		pending := value.(*relay.PendingApproval)
 		if pending.ChatID != source {
 			return true
 		}
@@ -269,7 +269,7 @@ func (c *Client) pendingForReply(source, requestID string) *messaging.PendingApp
 
 // Send calls the send JSON-RPC method, chunking at 2000 runes.
 func (c *Client) Send(ctx context.Context, chatID string, text string) error {
-	for _, chunk := range messaging.ChunkMessage(text, chunkLimit) {
+	for _, chunk := range relay.ChunkMessage(text, chunkLimit) {
 		params := map[string]any{"recipient": []string{chatID}, "message": chunk}
 		if _, err := c.rpc(ctx, "send", params); err != nil {
 			return err
@@ -288,14 +288,14 @@ func (c *Client) SetTyping(ctx context.Context, chatID string, active bool) erro
 }
 
 // AskApproval sends the text prompt and blocks for a YES/NO reply or ctx expiry.
-func (c *Client) AskApproval(ctx context.Context, chatID string, req messaging.ApprovalRequest) (bool, error) {
-	return messaging.AwaitApproval(ctx, &c.pending, c.Name(), chatID, req, func(req messaging.ApprovalRequest) error {
+func (c *Client) AskApproval(ctx context.Context, chatID string, req relay.ApprovalRequest) (bool, error) {
+	return relay.AwaitApproval(ctx, &c.pending, c.Name(), chatID, req, func(req relay.ApprovalRequest) error {
 		return c.Send(ctx, chatID, buildApprovalPrompt(req))
 	})
 }
 
-func buildApprovalPrompt(req messaging.ApprovalRequest) string {
-	return messaging.ApprovalPromptText(req) +
+func buildApprovalPrompt(req relay.ApprovalRequest) string {
+	return relay.ApprovalPromptText(req) +
 		"\n\nReply YES <id> to approve or NO <id> to deny (bare YES/NO works when one request is pending).\nReply ID: " + req.ID
 }
 

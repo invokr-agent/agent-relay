@@ -26,7 +26,7 @@ type Client struct {
 	allowedIDs     map[int64]bool
 	allowAll       bool
 	httpClient     *http.Client
-	pending        sync.Map // map[string]*messaging.PendingApproval — approval callbacks
+	pending        sync.Map // map[string]*relay.PendingApproval — approval callbacks
 }
 
 // New constructs a Client. Returns an error if token is empty.
@@ -55,16 +55,16 @@ func (c *Client) Name() string { return "telegram" }
 // that is not a valid integer is denied unless allowAll is set.
 func (c *Client) Allowed(chatID string) bool {
 	id, err := strconv.ParseInt(chatID, 10, 64)
-	return c.allowAll || (err == nil && messaging.Allowed(c.allowAll, c.allowedIDs, id))
+	return c.allowAll || (err == nil && relay.Allowed(c.allowAll, c.allowedIDs, id))
 }
 
 // Listen starts the long-poll loop. Closes the channel when ctx is cancelled
 // or a fatal error occurs (e.g. 401 Unauthorized).
-func (c *Client) Listen(ctx context.Context) (<-chan messaging.Inbound, error) {
-	return messaging.StartListen(ctx, c.pollLoop)
+func (c *Client) Listen(ctx context.Context) (<-chan relay.Inbound, error) {
+	return relay.StartListen(ctx, c.pollLoop)
 }
 
-func (c *Client) pollLoop(ctx context.Context, out chan<- messaging.Inbound) {
+func (c *Client) pollLoop(ctx context.Context, out chan<- relay.Inbound) {
 	defer close(out)
 	var offset int64
 	backoff := time.Second
@@ -74,7 +74,7 @@ func (c *Client) pollLoop(ctx context.Context, out chan<- messaging.Inbound) {
 		}
 		updates, fatal, err := c.getUpdates(ctx, offset)
 		if err != nil {
-			if fatal || !messaging.WaitBackoff(ctx, &backoff, maxBackoff) {
+			if fatal || !relay.WaitBackoff(ctx, &backoff, maxBackoff) {
 				return
 			}
 			continue
@@ -89,14 +89,14 @@ func (c *Client) pollLoop(ctx context.Context, out chan<- messaging.Inbound) {
 	}
 }
 
-func (c *Client) dispatchUpdate(ctx context.Context, u tgUpdate, out chan<- messaging.Inbound) {
+func (c *Client) dispatchUpdate(ctx context.Context, u tgUpdate, out chan<- relay.Inbound) {
 	if u.CallbackQuery != nil {
-		if messaging.Allowed(c.allowAll, c.allowedIDs, u.CallbackQuery.Message.Chat.ID) {
+		if relay.Allowed(c.allowAll, c.allowedIDs, u.CallbackQuery.Message.Chat.ID) {
 			c.handleCallback(ctx, u.CallbackQuery)
 		}
 		return
 	}
-	if u.Message == nil || u.Message.Text == "" || !messaging.Allowed(c.allowAll, c.allowedIDs, u.Message.Chat.ID) {
+	if u.Message == nil || u.Message.Text == "" || !relay.Allowed(c.allowAll, c.allowedIDs, u.Message.Chat.ID) {
 		return
 	}
 	sender := ""
@@ -104,7 +104,7 @@ func (c *Client) dispatchUpdate(ctx context.Context, u tgUpdate, out chan<- mess
 		sender = u.Message.From.Username
 	}
 	select {
-	case out <- messaging.Inbound{ChatID: strconv.FormatInt(u.Message.Chat.ID, 10), Sender: sender, Text: u.Message.Text}:
+	case out <- relay.Inbound{ChatID: strconv.FormatInt(u.Message.Chat.ID, 10), Sender: sender, Text: u.Message.Text}:
 	case <-ctx.Done():
 	}
 }
@@ -122,7 +122,7 @@ func (c *Client) handleCallback(ctx context.Context, cq *tgCallbackQuery) {
 	value, ok := c.pending.Load(reqID)
 	_ = c.answerCallbackQuery(ctx, cq.ID)
 	if ok {
-		if value.(*messaging.PendingApproval).ChatID != strconv.FormatInt(cq.Message.Chat.ID, 10) {
+		if value.(*relay.PendingApproval).ChatID != strconv.FormatInt(cq.Message.Chat.ID, 10) {
 			return
 		}
 		ok = c.pending.CompareAndDelete(reqID, value)
@@ -136,7 +136,7 @@ func (c *Client) handleCallback(ctx context.Context, cq *tgCallbackQuery) {
 		return
 	}
 	select {
-	case value.(*messaging.PendingApproval).Decision <- approved:
+	case value.(*relay.PendingApproval).Decision <- approved:
 	default:
 	}
 	label := "✅ Approved"
@@ -148,7 +148,7 @@ func (c *Client) handleCallback(ctx context.Context, cq *tgCallbackQuery) {
 
 // Send sends text to chatID, chunking at 4096 runes.
 func (c *Client) Send(ctx context.Context, chatID string, text string) error {
-	for _, chunk := range messaging.ChunkMessage(text, chunkLimit) {
+	for _, chunk := range relay.ChunkMessage(text, chunkLimit) {
 		if _, err := c.sendMessage(ctx, chatID, chunk, nil); err != nil {
 			return err
 		}
@@ -158,12 +158,12 @@ func (c *Client) Send(ctx context.Context, chatID string, text string) error {
 
 // AskApproval sends an inline-keyboard message and blocks until the user
 // clicks a button or ctx expires.
-func (c *Client) AskApproval(ctx context.Context, chatID string, req messaging.ApprovalRequest) (bool, error) {
-	return messaging.AwaitApproval(ctx, &c.pending, c.Name(), chatID, req, func(req messaging.ApprovalRequest) error {
+func (c *Client) AskApproval(ctx context.Context, chatID string, req relay.ApprovalRequest) (bool, error) {
+	return relay.AwaitApproval(ctx, &c.pending, c.Name(), chatID, req, func(req relay.ApprovalRequest) error {
 		markup := map[string]any{"inline_keyboard": [][]map[string]string{{
 			{"text": "✅ Approve", "callback_data": "approve:" + req.ID}, {"text": "❌ Deny", "callback_data": "deny:" + req.ID},
 		}}}
-		_, err := c.sendMessage(ctx, chatID, messaging.ApprovalPromptText(req), markup)
+		_, err := c.sendMessage(ctx, chatID, relay.ApprovalPromptText(req), markup)
 		return err
 	})
 }

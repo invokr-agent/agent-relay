@@ -236,7 +236,7 @@ func TestAskApproval_Approve(t *testing.T) {
 		f.callbackChan <- callbackInject{reqID: "req-1", approved: true}
 	}()
 
-	approved, err := c.AskApproval(ctx, "111", messaging.ApprovalRequest{
+	approved, err := c.AskApproval(ctx, "111", relay.ApprovalRequest{
 		ID: "req-1", Tool: "shell", Summary: "ls /tmp",
 	})
 	if err != nil {
@@ -259,7 +259,7 @@ func TestAskApproval_Deny(t *testing.T) {
 		f.callbackChan <- callbackInject{reqID: "req-2", approved: false}
 	}()
 
-	approved, err := c.AskApproval(ctx, "111", messaging.ApprovalRequest{
+	approved, err := c.AskApproval(ctx, "111", relay.ApprovalRequest{
 		ID: "req-2", Tool: "shell", Summary: "ls /tmp",
 	})
 	if err != nil {
@@ -284,7 +284,7 @@ func TestAskApproval_CallbackFromDisallowedChatIgnored(t *testing.T) {
 		f.callbackChan <- callbackInject{reqID: "req-3", approved: true}
 	}()
 
-	approved, err := c.AskApproval(ctx, "111", messaging.ApprovalRequest{ID: "req-3"})
+	approved, err := c.AskApproval(ctx, "111", relay.ApprovalRequest{ID: "req-3"})
 	if err == nil {
 		t.Fatal("expected timeout error since the callback's chat is not allowlisted")
 	}
@@ -298,7 +298,7 @@ func TestAskApproval_Timeout(t *testing.T) {
 	c := newClient(t, "tok7", nil, f)
 	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
 	defer cancel()
-	approved, err := c.AskApproval(ctx, "111", messaging.ApprovalRequest{ID: "req-timeout"})
+	approved, err := c.AskApproval(ctx, "111", relay.ApprovalRequest{ID: "req-timeout"})
 	if err == nil {
 		t.Fatal("expected timeout error")
 	}
@@ -395,7 +395,7 @@ func TestNew_EmptyToken(t *testing.T) {
 // T11: chunkMessage boundary — exactly 4096 runes → single chunk.
 func TestChunkMessage_Exact4096(t *testing.T) {
 	s := strings.Repeat("x", 4096)
-	chunks := messaging.ChunkMessage(s, 4096)
+	chunks := relay.ChunkMessage(s, 4096)
 	if len(chunks) != 1 {
 		t.Fatalf("expected 1 chunk, got %d", len(chunks))
 	}
@@ -404,7 +404,7 @@ func TestChunkMessage_Exact4096(t *testing.T) {
 // T12: chunkMessage boundary — 4097 runes → two chunks.
 func TestChunkMessage_4097(t *testing.T) {
 	s := strings.Repeat("x", 4097)
-	chunks := messaging.ChunkMessage(s, 4096)
+	chunks := relay.ChunkMessage(s, 4096)
 	if len(chunks) != 2 {
 		t.Fatalf("expected 2 chunks, got %d", len(chunks))
 	}
@@ -417,7 +417,7 @@ func TestChunkMessage_4097(t *testing.T) {
 }
 
 // Compile-time check that Client satisfies Transport.
-var _ messaging.Transport = (*Client)(nil)
+var _ relay.Transport = (*Client)(nil)
 
 // Reference fmt to avoid unused import.
 var _ = fmt.Sprintf
