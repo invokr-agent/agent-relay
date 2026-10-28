@@ -21,12 +21,14 @@ import (
 //
 //	setup --describe [client]   descriptors as JSON
 //	setup --apply <client>      answers JSON on stdin; verify, store, write config
+//	setup --pair <client>       pair, streaming JSON events
 //	setup [client]              interactive prompts
 func runSetup(args []string, stdin io.Reader, stdout io.Writer) error {
 	fs := flag.NewFlagSet("setup", flag.ContinueOnError)
 	path := fs.String("config", config.Path(), "config file")
 	describe := fs.Bool("describe", false, "print client descriptors as JSON")
 	apply := fs.String("apply", "", "apply answers JSON from stdin for `client`")
+	pair := fs.String("pair", "", "pair `client`, streaming JSON events")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -48,6 +50,12 @@ func runSetup(args []string, stdin io.Reader, stdout io.Writer) error {
 			return err
 		}
 		return enc.Encode(map[string]any{"setup_protocol": setup.Protocol, "client": *apply, "ok": true})
+	case *pair != "":
+		err := setup.Pair(ctx, *path, *pair, func(e setup.Event) { _ = enc.Encode(e) })
+		if err != nil {
+			_ = enc.Encode(setup.Event{Event: "error", Message: err.Error()})
+		}
+		return err
 	}
 	return interactive(ctx, *path, fs.Arg(0), stdin, stdout)
 }
