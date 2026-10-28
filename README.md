@@ -36,9 +36,8 @@ agent-relay -config agent-relay.json
 Releases are built by goreleaser and `checksums.txt` is signed keylessly with cosign from the release workflow:
 
 ```
-cosign verify-blob checksums.txt \
-  --signature checksums.txt.sig --certificate checksums.txt.pem \
-  --certificate-identity-regexp '^https://github.com/invokr-agent/agent-relay/.github/workflows/release.yml@refs/tags/v' \
+cosign verify-blob checksums.txt --bundle checksums.txt.sigstore.json \
+  --certificate-identity https://github.com/invokr-agent/agent-relay/.github/workflows/release.yml@refs/tags/vX.Y.Z \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com
 sha256sum --ignore-missing -c checksums.txt
 ```
