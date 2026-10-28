@@ -120,8 +120,9 @@ func (c *Client) handleCallback(ctx context.Context, cq *tgapi.CallbackQuery) {
 		}
 	}
 	edit := func(prefix string) {
+		title, _, _ := strings.Cut(strings.TrimPrefix(cq.Message.Text, "🔧 "), "\n")
 		_ = c.call(ctx, "editMessageText", map[string]any{"chat_id": cq.Message.Chat.ID,
-			"message_id": cq.Message.MessageID, "text": prefix + ": " + cq.Message.Text}, nil)
+			"message_id": cq.Message.MessageID, "text": prefix + " — " + title}, nil)
 	}
 	value, ok := c.pending.Load(reqID)
 	_ = c.call(ctx, "answerCallbackQuery", map[string]any{"callback_query_id": cq.ID}, nil)
@@ -138,7 +139,7 @@ func (c *Client) handleCallback(ctx context.Context, cq *tgapi.CallbackQuery) {
 		// Request already resolved (e.g. timed out): claiming Approved/Denied
 		// here would misreport what actually happened.
 		if cq.Message.Chat.ID != 0 && cq.Message.MessageID != 0 {
-			edit("⚠️ Expired")
+			edit("⌛ Timed out")
 		}
 		return
 	}

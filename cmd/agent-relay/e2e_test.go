@@ -189,10 +189,16 @@ func TestEndToEndTelegram(t *testing.T) {
 	if !ok {
 		t.Fatalf("no approval prompt; sent %v", fake.Sent())
 	}
+	if ask.Text != "🔧 make\nexecute" {
+		t.Fatalf("approval prompt: %q", ask.Text)
+	}
 	fake.UserClicks(8, 7, ask.MessageID, ask.Buttons[0])
 	fake.UserClicks(7, 7, ask.MessageID, ask.Buttons[1])
 	if _, ok := fake.Wait(10*time.Second, func(m telegramtest.Message) bool { return m.Text == "echo: skipped" }); !ok {
 		t.Fatalf("approval not decided by its approver; sent %v", fake.Sent())
+	}
+	if _, ok := fake.Wait(10*time.Second, func(m telegramtest.Message) bool { return m.Edited && m.Text == "❌ Denied — make" }); !ok {
+		t.Fatalf("approval prompt not resolved; sent %v", fake.Sent())
 	}
 	for _, m := range fake.Sent() {
 		if m.ChatID == 9 {

@@ -3,6 +3,8 @@ package kit
 import (
 	"strings"
 	"testing"
+
+	relay "github.com/invokr-agent/agent-relay"
 )
 
 func TestChunkMessage(t *testing.T) {
@@ -12,5 +14,15 @@ func TestChunkMessage(t *testing.T) {
 	got := ChunkMessage(strings.Repeat("é", 4097), 4096)
 	if len(got) != 2 || len([]rune(got[0])) != 4096 || got[1] != "é" {
 		t.Fatalf("4097 runes: %d chunks", len(got))
+	}
+}
+
+func TestApprovalPromptText(t *testing.T) {
+	if got := ApprovalPromptText(relay.ApprovalRequest{Tool: "make"}); got != "🔧 make" {
+		t.Fatalf("bare: %q", got)
+	}
+	got := ApprovalPromptText(relay.ApprovalRequest{Tool: "make", Summary: "execute", Details: strings.Repeat("é", 1<<10+1)})
+	if want := "🔧 make\nexecute\n\n" + strings.Repeat("é", 1<<10); got != want {
+		t.Fatalf("full: %q", got)
 	}
 }

@@ -15,9 +15,12 @@ import (
 // ApprovalPromptText renders the approval body both clients share; each
 // appends whatever reply instructions its own channel needs.
 func ApprovalPromptText(req relay.ApprovalRequest) string {
-	s := "🔧 Tool approval required\n\nTool: " + req.Tool + "\nSummary: " + req.Summary
+	s := "🔧 " + req.Tool
+	if req.Summary != "" {
+		s += "\n" + req.Summary
+	}
 	if req.Details != "" {
-		s += "\n\nDetails:\n" + req.Details
+		s += "\n\n" + ChunkMessage(req.Details, 1<<10)[0]
 	}
 	return s
 }
