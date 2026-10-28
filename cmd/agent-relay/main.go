@@ -49,9 +49,17 @@ type config struct {
 	} `json:"signal"`
 }
 
+// version is set at release time by goreleaser.
+var version = "dev"
+
 func main() {
 	path := flag.String("config", "agent-relay.json", "config file")
+	showVersion := flag.Bool("version", false, "print the version and exit")
 	flag.Parse()
+	if *showVersion {
+		fmt.Println(version)
+		return
+	}
 	logger := slog.New(slog.NewTextHandler(os.Stderr, nil))
 	if err := run(*path, logger); err != nil {
 		logger.Error("agent-relay stopped", "err", err)

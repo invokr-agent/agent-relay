@@ -31,6 +31,18 @@ agent-relay -config agent-relay.json
 - **Session map:** saved to `store`, which defaults to `<user config dir>/agent-relay/sessions.json`.
 - **Signal:** needs [signal-cli](https://github.com/AsamK/signal-cli) running in JSON-RPC mode on that socket.
 
+## Verify a release
+
+Releases are built by goreleaser and `checksums.txt` is signed keylessly with cosign from the release workflow:
+
+```
+cosign verify-blob checksums.txt \
+  --signature checksums.txt.sig --certificate checksums.txt.pem \
+  --certificate-identity-regexp '^https://github.com/invokr-agent/agent-relay/.github/workflows/release.yml@refs/tags/v' \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com
+sha256sum --ignore-missing -c checksums.txt
+```
+
 ## Develop
 
 `make test` runs the race-enabled tests. The bridge tests run a fake ACP agent as a real subprocess and chat with it through a fake transport.
