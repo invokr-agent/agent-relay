@@ -29,8 +29,8 @@ import (
 	"syscall"
 
 	"github.com/invokr-agent/agent-relay"
-	signalcli "github.com/invokr-agent/agent-relay/signal"
-	"github.com/invokr-agent/agent-relay/telegram"
+	signalcli "github.com/invokr-agent/agent-relay/clients/signal"
+	"github.com/invokr-agent/agent-relay/clients/telegram"
 )
 
 type config struct {
