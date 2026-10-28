@@ -47,6 +47,10 @@ agent-relay   # reads $XDG_CONFIG_HOME/agent-relay/config.json
 - **Agent:** `agent` is an argv, run without a shell. The session map (`store`, default `sessions.json` beside the config) is 0600.
 - **Signal:** needs [signal-cli](https://github.com/AsamK/signal-cli) in JSON-RPC mode on a Unix socket owned by the same user.
 
+## Service
+
+`agent-relay service install|uninstall|status` runs the relay as your user: a systemd `--user` unit (`Restart=on-failure`, `NoNewPrivileges=yes`) on Linux, a launchd agent on macOS. It refuses to run as root.
+
 ## Verify a release
 
 Releases are built by goreleaser and `checksums.txt` is signed keylessly with cosign from the release workflow:
