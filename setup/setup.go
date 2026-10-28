@@ -127,7 +127,7 @@ func Apply(ctx context.Context, path, client string, a Answers) error {
 	if err := Verify(ctx, client, a); err != nil {
 		return err
 	}
-	cfg, err := config.Load(path)
+	cfg, err := secrets.LoadConfig(path)
 	if err != nil {
 		return err
 	}

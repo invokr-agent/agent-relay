@@ -49,7 +49,7 @@ type Event struct {
 func Pair(ctx context.Context, path, client string, emit func(Event)) error {
 	ctx, cancel := context.WithTimeout(ctx, PairTTL)
 	defer cancel()
-	cfg, err := config.Load(path)
+	cfg, err := secrets.LoadConfig(path)
 	if err != nil {
 		return err
 	}

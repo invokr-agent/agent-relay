@@ -191,3 +191,26 @@ func TestSignalNoResponseTimesOut(t *testing.T) {
 		t.Fatal("silent signal-cli verified")
 	}
 }
+
+// A version 0 config's token moves to the secret store, never back to the file.
+func TestApplyMigratesLegacyToken(t *testing.T) {
+	keyring.MockInit()
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	sock := fakeSignal(t, func(string) []string { return []string{`{"jsonrpc":"2.0","id":1,"result":{}}`} })
+	path := config.Path()
+	if err := os.MkdirAll(config.Dir(), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(`{"agent":["a"],"telegram":{"token":"`+token+`"}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := Apply(context.Background(), path, "signal", Answers{"socket": sock}); err != nil {
+		t.Fatal(err)
+	}
+	if data, _ := os.ReadFile(path); strings.Contains(string(data), token) {
+		t.Fatal("legacy token written back")
+	}
+	if v, _ := secrets.Get(config.Dir(), secrets.TelegramToken); v != token {
+		t.Fatal("token not migrated")
+	}
+}

@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"syscall"
@@ -60,7 +61,7 @@ func Path() string { return filepath.Join(Dir(), "config.json") }
 // to move into the secret store.
 func Load(path string) (Config, error) {
 	cfg := Config{Version: Version}
-	data, err := ReadFile(path)
+	data, err := ReadFile(path, 0o022)
 	if errors.Is(err, os.ErrNotExist) {
 		return cfg, nil
 	}
@@ -88,6 +89,9 @@ func Load(path string) (Config, error) {
 
 // Save writes cfg atomically at 0600 in a 0700 directory.
 func Save(path string, cfg Config) error {
+	if cfg.Telegram != nil && cfg.Telegram.LegacyToken != "" {
+		return errors.New("config: refusing to save a plaintext telegram token")
+	}
 	cfg.Version = Version
 	data, err := json.MarshalIndent(cfg, "", "  ")
 	if err != nil {
@@ -98,28 +102,36 @@ func Save(path string, cfg Config) error {
 
 // ReadFile reads path only if it is a regular file (not a symlink) owned by
 // this user and not writable by others: the config names the argv agent-relay
-// runs, and the secrets file holds credentials.
-func ReadFile(path string) ([]byte, error) {
-	fi, err := os.Lstat(path)
+// runs, and the secrets file holds credentials. deny is the forbidden mode
+// bits: 0o022 for config, 0o077 for secrets.
+func ReadFile(path string, deny os.FileMode) ([]byte, error) {
+	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = f.Close() }()
+	fi, err := f.Stat()
 	if err != nil {
 		return nil, err
 	}
 	st, ok := fi.Sys().(*syscall.Stat_t)
-	if !fi.Mode().IsRegular() || !ok || int(st.Uid) != os.Getuid() || fi.Mode().Perm()&0o022 != 0 {
-		return nil, fmt.Errorf("%s must be a regular file owned by you and not group/world-writable", path)
+	if !fi.Mode().IsRegular() || !ok || int(st.Uid) != os.Getuid() || fi.Mode().Perm()&deny != 0 {
+		return nil, fmt.Errorf("%s must be a regular file owned by you with mode at most %o", path, 0o777&^deny)
 	}
-	return os.ReadFile(path)
+	return io.ReadAll(f)
 }
 
-// WriteFile replaces path atomically with a 0600 file in a 0700 directory.
+// WriteFile replaces path atomically with a 0600 file. Only agent-relay's own
+// config directory is tightened to 0700; other existing directories keep their mode.
 func WriteFile(path string, data []byte) error {
 	dir := filepath.Dir(path)
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return err
 	}
-	// MkdirAll leaves an existing directory's mode alone.
-	if err := os.Chmod(dir, 0o700); err != nil {
-		return err
+	if dir == Dir() {
+		if err := os.Chmod(dir, 0o700); err != nil {
+			return err
+		}
 	}
 	tmp, err := os.CreateTemp(filepath.Dir(path), ".tmp-*")
 	if err != nil {

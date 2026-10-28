@@ -29,6 +29,8 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"slices"
+	"strings"
 	"syscall"
 
 	relay "github.com/invokr-agent/agent-relay"
@@ -96,28 +98,25 @@ func run(path string, logger *slog.Logger) error {
 	defer stop()
 	agent := exec.CommandContext(ctx, cfg.Agent[0], cfg.Agent[1:]...)
 	agent.Stderr = os.Stderr
+	agent.Env = agentEnv(os.Environ())
 	bridge := &relay.Bridge{Store: store, Clients: clients, Logger: logger, Cwd: cfg.Cwd, RateLimit: cfg.RateLimit, Audit: slog.New(slog.NewJSONHandler(audit, nil))}
 	return bridge.Run(ctx, agent)
+}
+
+// agentEnv drops AGENT_RELAY_* so the agent cannot read relay secrets.
+func agentEnv(env []string) []string {
+	return slices.DeleteFunc(env, func(kv string) bool { return strings.HasPrefix(kv, "AGENT_RELAY_") })
 }
 
 // load reads the config, moving a version 0 file's token into the secret
 // store and rewriting the file as the current version.
 func load(path string) (config.Config, error) {
-	cfg, err := config.Load(path)
+	cfg, err := secrets.LoadConfig(path)
 	if err != nil {
 		return cfg, err
 	}
 	if len(cfg.Agent) == 0 {
 		return cfg, errors.New(`config: "agent" names the ACP agent argv, e.g. ["invokr", "acp"]`)
-	}
-	if t := cfg.Telegram; t != nil && t.LegacyToken != "" {
-		if _, err := secrets.Set(filepath.Dir(path), secrets.TelegramToken, t.LegacyToken); err != nil {
-			return cfg, err
-		}
-		t.LegacyToken = ""
-		if err := config.Save(path, cfg); err != nil {
-			return cfg, err
-		}
 	}
 	if cfg.Cwd == "" {
 		cfg.Cwd, _ = os.Getwd()

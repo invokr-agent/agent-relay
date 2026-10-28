@@ -66,7 +66,7 @@ func Set(dir, name, value string) (inKeyring bool, err error) {
 
 func readFile(dir string) (map[string]string, error) {
 	m := map[string]string{}
-	data, err := config.ReadFile(file(dir))
+	data, err := config.ReadFile(file(dir), 0o077)
 	if errors.Is(err, os.ErrNotExist) {
 		return m, nil
 	}
@@ -81,4 +81,19 @@ func InFile(dir, name string) bool {
 	m, err := readFile(dir)
 	_, ok := m[name]
 	return err == nil && ok
+}
+
+// LoadConfig loads the config at path, moving a version 0 file's token into
+// the secret store and rewriting the file without it.
+func LoadConfig(path string) (config.Config, error) {
+	cfg, err := config.Load(path)
+	t := cfg.Telegram
+	if err != nil || t == nil || t.LegacyToken == "" {
+		return cfg, err
+	}
+	if _, err := Set(filepath.Dir(path), TelegramToken, t.LegacyToken); err != nil {
+		return cfg, err
+	}
+	t.LegacyToken = ""
+	return cfg, config.Save(path, cfg)
 }

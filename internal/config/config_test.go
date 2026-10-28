@@ -79,15 +79,44 @@ func TestReadFileRefusesUnsafeFiles(t *testing.T) {
 	}
 }
 
-func TestWriteFileTightensDir(t *testing.T) {
-	dir := filepath.Join(t.TempDir(), "d")
-	if err := os.Mkdir(dir, 0o755); err != nil {
+func TestWriteFileTightensOnlyConfigDir(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	other := t.TempDir()
+	if err := os.Chmod(other, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := WriteFile(filepath.Join(dir, "f"), nil); err != nil {
+	if err := os.MkdirAll(Dir(), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if fi, _ := os.Stat(dir); fi.Mode().Perm() != 0o700 {
-		t.Fatalf("dir mode %v", fi.Mode())
+	for _, dir := range []string{Dir(), other} {
+		if err := WriteFile(filepath.Join(dir, "f"), nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if fi, _ := os.Stat(Dir()); fi.Mode().Perm() != 0o700 {
+		t.Fatalf("config dir mode %v", fi.Mode())
+	}
+	if fi, _ := os.Stat(other); fi.Mode().Perm() != 0o755 {
+		t.Fatalf("other dir mode %v", fi.Mode())
+	}
+}
+
+func TestReadFileSecretRefusesReadable(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "s")
+	if err := os.WriteFile(path, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ReadFile(path, 0o022); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ReadFile(path, 0o077); err == nil {
+		t.Fatal("world-readable secret read")
+	}
+}
+
+func TestSaveRefusesLegacyToken(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "c.json")
+	if Save(path, Config{Telegram: &Telegram{LegacyToken: "tok"}}) == nil {
+		t.Fatal("plaintext token saved")
 	}
 }

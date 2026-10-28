@@ -21,7 +21,7 @@ import (
 const maxAnswers = 64 << 10
 
 // verifyTimeout bounds --apply and interactive setup, verification included.
-const verifyTimeout = 30 * time.Second
+var verifyTimeout = 30 * time.Second
 
 // runSetup serves `agent-relay setup`:
 //
@@ -55,9 +55,7 @@ func runSetup(args []string, stdin io.Reader, stdout io.Writer) error {
 		}
 		return err
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), verifyTimeout)
-	defer cancel()
-	return interactive(ctx, *path, fs.Arg(0), stdin, stdout)
+	return interactive(*path, fs.Arg(0), stdin, stdout)
 }
 
 // applyJSON answers --apply on stdout: {"setup_protocol":1,"ok":true} or
@@ -87,7 +85,7 @@ func applyJSON(path, client string, stdin io.Reader, enc *json.Encoder) error {
 // interactive asks for each field of one client on plain lines; secrets are
 // read without echo when stdin is a terminal. Lines are read unbuffered so
 // the terminal reads and line reads never split stdin between them.
-func interactive(ctx context.Context, path, client string, in io.Reader, out io.Writer) error {
+func interactive(path, client string, in io.Reader, out io.Writer) error {
 	if client == "" {
 		_, _ = fmt.Fprint(out, "Client (telegram, signal): ")
 		client = readLine(in)
@@ -104,6 +102,8 @@ func interactive(ctx context.Context, path, client string, in io.Reader, out io.
 		_, _ = fmt.Fprintf(out, "%s (%s): ", f.Label, f.Help)
 		answers[f.Key] = readAnswer(in, out, f.Secret)
 	}
+	ctx, cancel := context.WithTimeout(context.Background(), verifyTimeout)
+	defer cancel()
 	if err := setup.Apply(ctx, path, client, answers); err != nil {
 		return err
 	}

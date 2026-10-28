@@ -53,3 +53,10 @@ func TestRunRefusesSymlinkedAuditLog(t *testing.T) {
 		t.Fatal("symlink target created")
 	}
 }
+
+func TestAgentEnvDropsRelayVars(t *testing.T) {
+	got := agentEnv([]string{"HOME=/h", "AGENT_RELAY_TELEGRAM_TOKEN=x", "AGENT_RELAY_OTHER=y"})
+	if len(got) != 1 || got[0] != "HOME=/h" {
+		t.Fatalf("env = %q", got)
+	}
+}

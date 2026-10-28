@@ -1,10 +1,17 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"encoding/json"
+	"fmt"
+	"io"
+	"net"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestSetupDescribe(t *testing.T) {
@@ -51,5 +58,44 @@ func TestSetupApplyReportsJSON(t *testing.T) {
 	}
 	if runSetup([]string{"--describe", "irc"}, nil, &bytes.Buffer{}) == nil {
 		t.Fatal("unknown client described")
+	}
+}
+
+type slowReader struct{ r io.Reader }
+
+func (s slowReader) Read(p []byte) (int, error) {
+	time.Sleep(20 * time.Millisecond)
+	return s.r.Read(p)
+}
+
+// The verify timeout starts after the prompts, not before them.
+func TestSetupTimeoutExcludesPrompts(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	dir, err := os.MkdirTemp("", "sig")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	sock := filepath.Join(dir, "s")
+	l, err := net.Listen("unix", sock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = l.Close() })
+	go func() {
+		conn, err := l.Accept()
+		if err != nil {
+			return
+		}
+		defer func() { _ = conn.Close() }()
+		if bufio.NewScanner(conn).Scan() {
+			_, _ = fmt.Fprintln(conn, `{"jsonrpc":"2.0","id":1,"result":{}}`)
+		}
+	}()
+	defer func(d time.Duration) { verifyTimeout = d }(verifyTimeout)
+	verifyTimeout = 500 * time.Millisecond
+	in := slowReader{strings.NewReader(sock + strings.Repeat("\n", 40))}
+	if err := runSetup([]string{"signal"}, in, io.Discard); err != nil {
+		t.Fatal(err)
 	}
 }

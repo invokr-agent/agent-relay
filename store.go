@@ -27,7 +27,7 @@ type Store struct {
 // silently replaced.
 func NewStore(path string) (*Store, error) {
 	s := &Store{path: path, sessions: map[string]string{}}
-	data, err := os.ReadFile(path)
+	data, err := config.ReadFile(path, 0o022)
 	if errors.Is(err, os.ErrNotExist) {
 		return s, nil
 	}
