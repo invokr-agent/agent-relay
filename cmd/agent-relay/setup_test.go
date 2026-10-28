@@ -46,6 +46,8 @@ func TestSetupApplyReportsJSON(t *testing.T) {
 	for in, field := range map[string]string{
 		`{"token":"x","bogus":"y"}`:        "bogus",
 		`{"token":"x","agent":7}`:          "agent",
+		`{"token":null}`:                   "token",
+		`{"token":5}`:                      "token",
 		`{"token":"x"} {}`:                 "",
 		strings.Repeat(" ", 70<<10) + `{}`: "",
 	} {

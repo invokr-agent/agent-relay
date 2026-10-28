@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"slices"
 	"strings"
 	"time"
 
@@ -103,10 +104,13 @@ func applyJSON(path, client string, stdin io.Reader) error {
 	if err := dec.Decode(&raw); err != nil || dec.More() {
 		return errors.New("setup: answers must be one JSON object, at most 64 KiB")
 	}
+	d, _ := setup.Describe(path, client)
 	answers := setup.Answers{}
 	for k, v := range raw {
-		s := string(v) // a non-string (a list) is kept as its JSON text
-		_ = json.Unmarshal(v, &s)
+		s := string(v)
+		if s == "null" || json.Unmarshal(v, &s) != nil && !(len(d) > 0 && slices.ContainsFunc(d[0].Fields, func(f setup.Field) bool { return f.Key == k && f.Type == "list" })) {
+			return &setup.FieldError{Key: k, Problem: "has the wrong type"}
+		}
 		answers[k] = s
 	}
 	return setup.Apply(ctx, path, client, answers)
@@ -120,10 +124,7 @@ func interactive(path, client string, in io.Reader, out io.Writer) error {
 		_, _ = fmt.Fprint(out, "Client (telegram, signal): ")
 		client = readLine(in)
 	}
-	d, err := setup.Describe(path, client)
-	if err != nil {
-		return err
-	}
+	d, _ := setup.Describe(path, client)
 	if d[0].Notice != "" {
 		_, _ = fmt.Fprintln(out, "Note:", d[0].Notice)
 	}

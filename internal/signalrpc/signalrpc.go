@@ -14,8 +14,8 @@ import (
 )
 
 const (
-	DialTimeout = 5 * time.Second
 	// DialTimeout bounds connecting and the subscribe handshake.
+	DialTimeout = 5 * time.Second
 	// MaxLine bounds one JSON-RPC line.
 	MaxLine = 1 << 20
 )

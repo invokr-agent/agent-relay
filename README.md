@@ -1,6 +1,6 @@
 # agent-relay
 
-Chat with a coding agent from Telegram or Signal. agent-relay is an [ACP](https://agentclientprotocol.com) client: it spawns any ACP agent, such as `invokr acp` or another agent with ACP support, and bridges your chats to it.
+Chat with a coding agent from Telegram or Signal. agent-relay is an [ACP](https://agentclientprotocol.com) client: it spawns any ACP agent, such as `invokr acp` or another agent with ACP support, and bridges your chats to it. Linux and macOS only.
 
 - **Sessions:** each chat has its own agent session. It is kept across restarts and resumed with `session/load` when the agent supports it; replayed history is not posted again.
 - **Turns:** a chat's messages run one turn at a time. The streamed answer is posted as one message, split to the platform's size limit.
@@ -51,6 +51,7 @@ agent-relay   # reads $XDG_CONFIG_HOME/agent-relay/config.json
 - **Approvals:** only the user whose message started the turn can answer; an unanswered prompt denies. Every decision is appended to `audit_log` (default `audit.log` beside the config).
 - **Rate limit:** `rate_limit` messages per chat per minute (default 20); the rest are dropped.
 - **Agent:** `agent` is an argv, run without a shell. Dropping `AGENT_RELAY_*` from its environment is not isolation: the agent runs as your user and can read the config, `secrets.json` and your keyring; sandbox it yourself if that matters. The session map (`store`, default `sessions.json` beside the config) is 0600.
+- **Known limits:** ACP carries no turn id, so a late permission request from a finished prompt that arrives during the next prompt is attributed to the next prompt.
 - **Signal:** needs [signal-cli](https://github.com/AsamK/signal-cli) in JSON-RPC mode on a Unix socket owned by the same user.
 
 ## Service
