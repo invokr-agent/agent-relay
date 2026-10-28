@@ -1,4 +1,4 @@
-module github.com/invokr-agent/invokr/tools/customlint
+module github.com/invokr-agent/agent-relay/tools/customlint
 
 go 1.26.3
 
