@@ -6,7 +6,7 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/invokr-agent/agent-relay"
+	relay "github.com/invokr-agent/agent-relay"
 )
 
 // PendingApproval binds a reply channel to its requesting chat.

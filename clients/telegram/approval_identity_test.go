@@ -12,7 +12,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/invokr-agent/agent-relay"
+	relay "github.com/invokr-agent/agent-relay"
 	"github.com/invokr-agent/agent-relay/internal/kit"
 )
 

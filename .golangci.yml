@@ -30,3 +30,8 @@ linters:
     rules:
       - path: _test\.go
         linters: [gocyclo, gocognit, funlen, nestif, dupl]
+formatters:
+  enable: [gofmt, goimports]
+  settings:
+    goimports:
+      local-prefixes: [github.com/invokr-agent/agent-relay]

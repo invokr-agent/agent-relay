@@ -6,7 +6,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/invokr-agent/agent-relay"
+	relay "github.com/invokr-agent/agent-relay"
 )
 
 // ApprovalPromptText renders the approval body both clients share; each

@@ -31,7 +31,7 @@ import (
 	"path/filepath"
 	"syscall"
 
-	"github.com/invokr-agent/agent-relay"
+	relay "github.com/invokr-agent/agent-relay"
 	signalcli "github.com/invokr-agent/agent-relay/clients/signal"
 	"github.com/invokr-agent/agent-relay/clients/telegram"
 	"github.com/invokr-agent/agent-relay/internal/config"

@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/invokr-agent/agent-relay"
+	relay "github.com/invokr-agent/agent-relay"
 )
 
 type fakeTelegramServer struct {
