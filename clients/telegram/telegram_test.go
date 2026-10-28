@@ -27,7 +27,11 @@ type fakeTelegramServer struct {
 type callbackInject struct {
 	reqID    string
 	approved bool
+	from     int64
 }
+
+// requester is the user whose message in chat 111 the test approvals answer.
+const requester = 7
 
 func newFakeServer(t *testing.T, token string) *fakeTelegramServer {
 	t.Helper()
@@ -49,6 +53,7 @@ func newFakeServer(t *testing.T, token string) *fakeTelegramServer {
 		case cb := <-f.callbackChan:
 			cq := tgCallbackQuery{
 				ID:      "cq1",
+				From:    &tgUser{ID: cb.from},
 				Data:    "deny:" + cb.reqID,
 				Message: tgMessage{MessageID: 99, Chat: tgChat{ID: 111}, Text: "approve?"},
 			}
@@ -103,6 +108,7 @@ func newClientAllowAll(t *testing.T, token string, allowedIDs []int64, allowAll 
 	if err != nil {
 		t.Fatalf("NewWithBaseURL: %v", err)
 	}
+	c.senders.Store("111", fmt.Sprint(requester))
 	return c
 }
 
@@ -233,7 +239,7 @@ func TestAskApproval_Approve(t *testing.T) {
 	// inject callback after a short delay
 	go func() {
 		time.Sleep(50 * time.Millisecond)
-		f.callbackChan <- callbackInject{reqID: "req-1", approved: true}
+		f.callbackChan <- callbackInject{reqID: "req-1", approved: true, from: requester}
 	}()
 
 	approved, err := c.AskApproval(ctx, "111", relay.ApprovalRequest{
@@ -256,7 +262,7 @@ func TestAskApproval_Deny(t *testing.T) {
 
 	go func() {
 		time.Sleep(50 * time.Millisecond)
-		f.callbackChan <- callbackInject{reqID: "req-2", approved: false}
+		f.callbackChan <- callbackInject{reqID: "req-2", approved: false, from: requester}
 	}()
 
 	approved, err := c.AskApproval(ctx, "111", relay.ApprovalRequest{
@@ -281,7 +287,7 @@ func TestAskApproval_CallbackFromDisallowedChatIgnored(t *testing.T) {
 
 	go func() {
 		time.Sleep(20 * time.Millisecond)
-		f.callbackChan <- callbackInject{reqID: "req-3", approved: true}
+		f.callbackChan <- callbackInject{reqID: "req-3", approved: true, from: requester}
 	}()
 
 	approved, err := c.AskApproval(ctx, "111", relay.ApprovalRequest{ID: "req-3"})
@@ -290,6 +296,37 @@ func TestAskApproval_CallbackFromDisallowedChatIgnored(t *testing.T) {
 	}
 	if approved {
 		t.Fatal("expected approved=false; callback from disallowed chat must not resolve the request")
+	}
+}
+
+// In a group any member can press the buttons; only the requester decides.
+func TestAskApproval_CallbackFromOtherGroupMemberIgnored(t *testing.T) {
+	f := newFakeServer(t, "tok6c")
+	c := newClient(t, "tok6c", []int64{111}, f)
+	ctx, cancel := context.WithTimeout(context.Background(), 150*time.Millisecond)
+	defer cancel()
+	_, _ = c.Listen(ctx)
+	go func() {
+		time.Sleep(20 * time.Millisecond)
+		f.callbackChan <- callbackInject{reqID: "req-4", approved: true, from: requester + 1}
+	}()
+	approved, err := c.AskApproval(ctx, "111", relay.ApprovalRequest{ID: "req-4"})
+	if approved || err == nil {
+		t.Fatalf("another member's callback decided the request: %v, %v", approved, err)
+	}
+}
+
+// A transport error must not carry the request URL, which holds the token.
+func TestAPIErrorOmitsToken(t *testing.T) {
+	srv := httptest.NewServer(http.NotFoundHandler())
+	srv.Close()
+	c, err := NewWithBaseURL("secret-token", nil, false, srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = c.Send(context.Background(), "1", "hi")
+	if err == nil || strings.Contains(err.Error(), "secret-token") {
+		t.Fatalf("error = %v", err)
 	}
 }
 

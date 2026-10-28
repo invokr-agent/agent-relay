@@ -77,23 +77,9 @@ func (b *Bridge) Run(ctx context.Context, agent *exec.Cmd) error {
 		return fmt.Errorf("messaging: initialize agent: %w", err)
 	}
 	b.canLoad = init.AgentCapabilities != nil && init.AgentCapabilities.LoadSession
-	inbound := make(chan struct {
-		msg Inbound
-		t   Client
-	}, 64)
-	for _, t := range b.Clients {
-		ch, err := t.Listen(ctx)
-		if err != nil {
-			return fmt.Errorf("messaging: %s listen: %w", t.Name(), err)
-		}
-		go func() {
-			for msg := range ch {
-				inbound <- struct {
-					msg Inbound
-					t   Client
-				}{msg, t}
-			}
-		}()
+	inbound, stopped, err := b.listen(ctx)
+	if err != nil {
+		return err
 	}
 	for {
 		select {
@@ -101,15 +87,58 @@ func (b *Bridge) Run(ctx context.Context, agent *exec.Cmd) error {
 			return nil
 		case <-conn.Done():
 			return fmt.Errorf("messaging: agent exited: %w", conn.Err())
+		case name := <-stopped:
+			if ctx.Err() != nil {
+				return nil
+			}
+			return fmt.Errorf("messaging: %s listener stopped", name)
 		case in := <-inbound:
 			b.route(ctx, in.t, in.msg)
 		}
 	}
 }
 
+type delivery struct {
+	msg Inbound
+	t   Client
+}
+
+// listen starts every client; stopped names a client whose listener closed.
+func (b *Bridge) listen(ctx context.Context) (inbound chan delivery, stopped chan string, err error) {
+	inbound = make(chan delivery, 64)
+	stopped = make(chan string, len(b.Clients))
+	for _, t := range b.Clients {
+		ch, err := t.Listen(ctx)
+		if err != nil {
+			return nil, nil, fmt.Errorf("messaging: %s listen: %w", t.Name(), err)
+		}
+		go forward(ctx, t, ch, inbound, stopped)
+	}
+	return inbound, stopped, nil
+}
+
+// forward feeds one client's messages to Run, and reports the client's
+// channel closing so a dead listener (e.g. a revoked token) is not silent.
+func forward(ctx context.Context, t Client, ch <-chan Inbound, inbound chan<- delivery, stopped chan<- string) {
+	for msg := range ch {
+		select {
+		case inbound <- delivery{msg, t}:
+		case <-ctx.Done():
+			return
+		}
+	}
+	stopped <- t.Name()
+}
+
+// notify sends a notice without blocking Run: a client's Send may need the
+// same listener that is waiting on Run to drain its channel.
+func notify(ctx context.Context, t Client, chatID, text string) {
+	go func() { _ = t.Send(ctx, chatID, text) }()
+}
+
 func (b *Bridge) route(ctx context.Context, t Client, msg Inbound) {
 	if !t.Allowed(msg.ChatID) {
-		_ = t.Send(ctx, msg.ChatID, "Access denied.")
+		notify(ctx, t, msg.ChatID, "Access denied.")
 		return
 	}
 	key := t.Name() + ":" + msg.ChatID
@@ -128,7 +157,7 @@ func (b *Bridge) route(ctx context.Context, t Client, msg Inbound) {
 	select {
 	case c.inbox <- msg.Text:
 	default:
-		_ = t.Send(ctx, msg.ChatID, "busy — try again shortly")
+		notify(ctx, t, msg.ChatID, "busy — try again shortly")
 	}
 }
 
@@ -143,7 +172,9 @@ func (b *Bridge) serve(ctx context.Context, c *chat) {
 		case text := <-c.inbox:
 			if err := b.handle(ctx, c, strings.TrimSpace(text)); err != nil {
 				b.Logger.Error("turn failed", "chat", c.key, "err", err)
-				_ = c.t.Send(ctx, c.id, "⚠️ "+err.Error())
+				// The error stays in the log: its text can carry secrets
+				// (a client's request URL) that must not reach the chat.
+				_ = c.t.Send(ctx, c.id, "⚠️ the turn failed; see the relay log")
 			}
 		}
 	}
@@ -161,6 +192,10 @@ func (b *Bridge) handle(ctx context.Context, c *chat, text string) error {
 			return err
 		}
 	}
+	// Drop text left by an earlier failed turn so it does not lead this reply.
+	c.mu.Lock()
+	c.reply.Reset()
+	c.mu.Unlock()
 	stop := b.typing(ctx, c)
 	resp, err := b.conn.Prompt(ctx, acp.PromptRequest{SessionID: c.current(),
 		Prompt: []acp.ContentBlock{{Text: &acp.TextContent{Text: text}}}})
@@ -256,7 +291,8 @@ func (b *Bridge) RequestPermission(ctx context.Context, req acp.RequestPermissio
 	ctx, cancel := context.WithTimeout(ctx, approvalTimeout)
 	defer cancel()
 	approved, err := c.t.AskApproval(ctx, c.id, ApprovalRequest{
-		ID:      fmt.Sprint(req.ToolCall.ToolCallID, "-", b.approvals.Add(1)),
+		// The counter alone: Telegram caps callback_data at 64 bytes.
+		ID:      fmt.Sprint(b.approvals.Add(1)),
 		Tool:    cmp.Or(req.ToolCall.Title, req.ToolCall.Name, string(req.ToolCall.ToolCallID)),
 		Summary: string(req.ToolCall.Kind),
 		Details: string(req.ToolCall.RawInput),

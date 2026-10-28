@@ -4,8 +4,10 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"sync"
@@ -32,6 +34,7 @@ type Client struct {
 	allowAll       bool
 	httpClient     *http.Client
 	pending        sync.Map // map[string]*relay.PendingApproval — approval callbacks
+	senders        sync.Map // chat ID → user ID of the chat's latest message
 }
 
 // New constructs a Client. Returns an error if token is empty.
@@ -107,6 +110,7 @@ func (c *Client) dispatchUpdate(ctx context.Context, u tgUpdate, out chan<- rela
 	sender := ""
 	if u.Message.From != nil {
 		sender = u.Message.From.Username
+		c.senders.Store(strconv.FormatInt(u.Message.Chat.ID, 10), strconv.FormatInt(u.Message.From.ID, 10))
 	}
 	select {
 	case out <- relay.Inbound{ChatID: strconv.FormatInt(u.Message.Chat.ID, 10), Sender: sender, Text: u.Message.Text}:
@@ -127,7 +131,10 @@ func (c *Client) handleCallback(ctx context.Context, cq *tgCallbackQuery) {
 	value, ok := c.pending.Load(reqID)
 	_ = c.answerCallbackQuery(ctx, cq.ID)
 	if ok {
-		if value.(*relay.PendingApproval).ChatID != strconv.FormatInt(cq.Message.Chat.ID, 10) {
+		p := value.(*relay.PendingApproval)
+		// In a group the chat is shared: only the user whose message led to
+		// the request may answer it.
+		if p.ChatID != strconv.FormatInt(cq.Message.Chat.ID, 10) || cq.From == nil || p.Sender != strconv.FormatInt(cq.From.ID, 10) {
 			return
 		}
 		ok = c.pending.CompareAndDelete(reqID, value)
@@ -164,7 +171,9 @@ func (c *Client) Send(ctx context.Context, chatID string, text string) error {
 // AskApproval sends an inline-keyboard message and blocks until the user
 // clicks a button or ctx expires.
 func (c *Client) AskApproval(ctx context.Context, chatID string, req relay.ApprovalRequest) (bool, error) {
-	return relay.AwaitApproval(ctx, &c.pending, c.Name(), chatID, req, func(req relay.ApprovalRequest) error {
+	sender, _ := c.senders.Load(chatID)
+	senderID, _ := sender.(string)
+	return relay.AwaitApproval(ctx, &c.pending, c.Name(), chatID, senderID, req, func(req relay.ApprovalRequest) error {
 		markup := map[string]any{"inline_keyboard": [][]map[string]string{{
 			{"text": "✅ Approve", "callback_data": "approve:" + req.ID}, {"text": "❌ Deny", "callback_data": "deny:" + req.ID},
 		}}}
@@ -258,14 +267,18 @@ func (c *Client) apiPost(ctx context.Context, method string, body any) ([]byte, 
 	if err != nil {
 		return nil, 0, fmt.Errorf("telegram: marshal %s: %w", method, err)
 	}
-	url := fmt.Sprintf("%s/bot%s/%s", c.baseURL, c.token, method)
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(raw))
+	endpoint := fmt.Sprintf("%s/bot%s/%s", c.baseURL, c.token, method)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(raw))
 	if err != nil {
 		return nil, 0, fmt.Errorf("telegram: build request %s: %w", method, err)
 	}
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
+		// *url.Error quotes the request URL, which holds the bot token.
+		if ue, ok := errors.AsType[*url.Error](err); ok {
+			err = ue.Err
+		}
 		return nil, 0, fmt.Errorf("telegram: %s: %w", method, err)
 	}
 	defer func() { _ = resp.Body.Close() }()
@@ -302,6 +315,7 @@ type tgUser struct {
 
 type tgCallbackQuery struct {
 	ID      string    `json:"id"`
+	From    *tgUser   `json:"from"`
 	Data    string    `json:"data"`
 	Message tgMessage `json:"message"`
 }

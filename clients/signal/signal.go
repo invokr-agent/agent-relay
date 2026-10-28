@@ -2,6 +2,7 @@ package signal
 
 import (
 	"bufio"
+	"cmp"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -20,7 +21,12 @@ const (
 	dialTimeout   = 5 * time.Second
 	maxBackoff    = 60 * time.Second
 	reconnectWait = 2 * time.Second
+	maxLine       = 1 << 20
 )
+
+// rpcTimeout bounds one call: a connection dropped after the write would
+// otherwise leave the caller waiting on a response that never comes.
+var rpcTimeout = 10 * time.Second
 
 // Client is a signal-cli JSON-RPC over UNIX socket client.
 var (
@@ -173,9 +179,11 @@ type rpcResult struct {
 
 type signalParams struct {
 	Envelope struct {
-		Source      string `json:"source"`
-		DataMessage *struct {
-			Message string `json:"message"`
+		Source       string `json:"source"`
+		SourceNumber string `json:"sourceNumber"`
+		DataMessage  *struct {
+			Message   string          `json:"message"`
+			GroupInfo json.RawMessage `json:"groupInfo"`
 		} `json:"dataMessage"`
 	} `json:"envelope"`
 }
@@ -198,18 +206,21 @@ func (c *Client) dispatchLine(ctx context.Context, line []byte, out chan<- relay
 		return
 	}
 	env := params.Envelope
-	if env.DataMessage == nil || env.DataMessage.Message == "" {
+	// Group messages are skipped: a reply would go to the sender as a DM.
+	if env.DataMessage == nil || env.DataMessage.Message == "" || env.DataMessage.GroupInfo != nil {
 		return
 	}
+	// Newer signal-cli puts a UUID in source and the number in sourceNumber.
+	source := cmp.Or(env.SourceNumber, env.Source)
 	text := strings.TrimSpace(env.DataMessage.Message)
-	if c.handleApprovalReply(env.Source, text) {
+	if c.handleApprovalReply(source, text) {
 		return
 	}
-	if !c.Allowed(env.Source) {
+	if !c.Allowed(source) {
 		return
 	}
 	select {
-	case out <- relay.Inbound{ChatID: env.Source, Sender: env.Source, Text: text}:
+	case out <- relay.Inbound{ChatID: source, Sender: source, Text: text}:
 	case <-ctx.Done():
 	}
 }
@@ -294,7 +305,7 @@ func (c *Client) SetTyping(ctx context.Context, chatID string, active bool) erro
 
 // AskApproval sends the text prompt and blocks for a YES/NO reply or ctx expiry.
 func (c *Client) AskApproval(ctx context.Context, chatID string, req relay.ApprovalRequest) (bool, error) {
-	return relay.AwaitApproval(ctx, &c.pending, c.Name(), chatID, req, func(req relay.ApprovalRequest) error {
+	return relay.AwaitApproval(ctx, &c.pending, c.Name(), chatID, chatID, req, func(req relay.ApprovalRequest) error {
 		return c.Send(ctx, chatID, buildApprovalPrompt(req))
 	})
 }
@@ -341,6 +352,8 @@ func (c *Client) rpc(ctx context.Context, method string, params any) (json.RawMe
 		return nil, err
 	}
 
+	ctx, cancel := context.WithTimeout(ctx, rpcTimeout)
+	defer cancel()
 	ch := make(chan rpcResult, 1)
 	c.pendingRPC.Store(id, ch)
 	defer c.pendingRPC.Delete(id)
@@ -379,6 +392,7 @@ func (c *Client) subscribe(_ context.Context) error {
 		return fmt.Errorf("signal: subscribe write: %w", err)
 	}
 	scanner := bufio.NewScanner(conn)
+	scanner.Buffer(nil, maxLine)
 	buffered, err := c.readSubscribeAck(scanner, id)
 	if err != nil {
 		return err

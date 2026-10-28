@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net"
 	"strings"
 	"testing"
@@ -549,5 +550,69 @@ func TestAllowed(t *testing.T) {
 	all := &Client{allowAll: true}
 	if !all.Allowed("+anyone") {
 		t.Fatal("expected allowAll to admit any number")
+	}
+}
+
+func writeEnvelope(conn net.Conn, envelope map[string]any) {
+	raw, _ := json.Marshal(map[string]any{"jsonrpc": "2.0", "method": "receive", "params": map[string]any{"envelope": envelope}})
+	_, _ = conn.Write(append(raw, '\n'))
+}
+
+// Newer signal-cli sends a UUID as source; the number is in sourceNumber.
+// Group messages are skipped rather than answered as DMs.
+func TestListen_SourceNumberAndGroups(t *testing.T) {
+	c, server := newTestClient(t, []string{"+1allowed"})
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	ch, _ := c.Listen(ctx)
+	go func() {
+		writeEnvelope(server, map[string]any{"source": "+1allowed", "sourceNumber": "+1allowed",
+			"dataMessage": map[string]any{"message": "in group", "groupInfo": map[string]any{"groupId": "g"}}})
+		writeEnvelope(server, map[string]any{"source": "8c1e-uuid", "sourceNumber": "+1allowed",
+			"dataMessage": map[string]any{"message": "direct"}})
+	}()
+	select {
+	case msg := <-ch:
+		if msg.ChatID != "+1allowed" || msg.Text != "direct" {
+			t.Fatalf("unexpected: %+v", msg)
+		}
+	case <-ctx.Done():
+		t.Fatal("timeout waiting for message")
+	}
+}
+
+// Lines past bufio.Scanner's 64 KiB default must not kill the connection.
+func TestListen_LongLine(t *testing.T) {
+	c, server := newTestClient(t, []string{"+1allowed"})
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	ch, _ := c.Listen(ctx)
+	long := strings.Repeat("x", 100_000)
+	go writeNotification(server, "+1allowed", long)
+	select {
+	case msg := <-ch:
+		if msg.Text != long {
+			t.Fatalf("got %d bytes", len(msg.Text))
+		}
+	case <-ctx.Done():
+		t.Fatal("long message lost")
+	}
+}
+
+// A call whose response never arrives fails instead of hanging.
+func TestSend_TimesOutWithoutResponse(t *testing.T) {
+	defer func(d time.Duration) { rpcTimeout = d }(rpcTimeout)
+	rpcTimeout = 50 * time.Millisecond
+	c, server := newTestClient(t, nil)
+	go func() { _, _ = io.Copy(io.Discard, server) }()
+	done := make(chan error, 1)
+	go func() { done <- c.Send(context.Background(), "+1", "hi") }()
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("expected timeout error")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Send hung without a response")
 	}
 }

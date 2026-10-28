@@ -2,6 +2,7 @@ package relay
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -57,6 +58,9 @@ func (a *fakeAgent) LoadSession(ctx context.Context, req acp.LoadSessionRequest)
 func (a *fakeAgent) Prompt(ctx context.Context, req acp.PromptRequest) (acp.PromptResponse, error) {
 	text := req.Prompt[0].Text.Text
 	switch text {
+	case "fail":
+		_ = a.say(ctx, req.SessionID, "partial ")
+		return acp.PromptResponse{}, errors.New("boom")
 	case "wait":
 		<-ctx.Done()
 		return acp.PromptResponse{}, ctx.Err()
@@ -208,5 +212,37 @@ func TestBridgeResumesStoredSession(t *testing.T) {
 	second.say("again")
 	if got := second.next(t); got != "echo: again (s1)" || strings.Contains(got, "replayed") {
 		t.Fatalf("after restart: %q, want the stored session without its history", got)
+	}
+}
+
+// A failed turn reports a generic error (its text can carry secrets), and its
+// partial answer does not lead the next reply.
+func TestBridgeFailedTurn(t *testing.T) {
+	chat := newFakeClient(true)
+	startBridge(t, filepath.Join(t.TempDir(), "sessions.json"), chat)
+	chat.say("fail")
+	if got := chat.next(t); strings.Contains(got, "boom") {
+		t.Fatalf("error text reached the chat: %q", got)
+	}
+	chat.say("hi")
+	if got := chat.next(t); got != "echo: hi (s1)" {
+		t.Fatalf("reply = %q", got)
+	}
+}
+
+// A client whose listener stops ends Run with an error instead of going quiet.
+func TestBridgeListenerStopped(t *testing.T) {
+	chat := newFakeClient(true)
+	s, err := NewStore(filepath.Join(t.TempDir(), "sessions.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	b := &Bridge{Store: s, Clients: []Client{chat}, Logger: slog.New(slog.DiscardHandler), Cwd: t.TempDir()}
+	cmd := exec.Command(os.Args[0], "-test.run=^$")
+	cmd.Env = append(os.Environ(), fakeAgentEnv+"=1")
+	close(chat.in)
+	err = b.Run(context.Background(), cmd)
+	if err == nil || !strings.Contains(err.Error(), "fake listener stopped") {
+		t.Fatalf("Run = %v", err)
 	}
 }

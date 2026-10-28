@@ -34,7 +34,7 @@ func TestApprovalIdentityAndCleanup(t *testing.T) {
 				switch scenario {
 				case "wrong peer":
 					client.dispatchUpdate(context.Background(), tgUpdate{CallbackQuery: &tgCallbackQuery{
-						ID: "wrong", Data: "approve:request", Message: tgMessage{MessageID: 42, Chat: tgChat{ID: 222}},
+						ID: "wrong", From: &tgUser{ID: 7}, Data: "approve:request", Message: tgMessage{MessageID: 42, Chat: tgChat{ID: 222}},
 					}}, nil)
 					if got, _ := client.pending.Load("request"); got != original {
 						t.Error("wrong allowed peer consumed request")
@@ -60,7 +60,7 @@ func TestApprovalIdentityAndCleanup(t *testing.T) {
 				}
 				if scenario == "wrong peer" || scenario == "duplicate" {
 					client.dispatchUpdate(context.Background(), tgUpdate{CallbackQuery: &tgCallbackQuery{
-						ID: "right", Data: "approve:request", Message: tgMessage{MessageID: 42, Chat: tgChat{ID: 111}},
+						ID: "right", From: &tgUser{ID: 7}, Data: "approve:request", Message: tgMessage{MessageID: 42, Chat: tgChat{ID: 111}},
 					}}, nil)
 				}
 				_, _ = fmt.Fprint(w, `{"ok":true,"result":{"message_id":42}}`)
@@ -71,6 +71,7 @@ func TestApprovalIdentityAndCleanup(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
+			client.senders.Store("111", "7")
 			approved, err := client.AskApproval(ctx, "111", relay.ApprovalRequest{ID: " request "})
 			switch scenario {
 			case "wrong peer", "duplicate":
@@ -130,7 +131,7 @@ func TestUnacceptedCallbacksNeverClaimDecision(t *testing.T) {
 				t.Fatal(err)
 			}
 			if scenario == "wrong peer" {
-				client.pending.Store("request", &relay.PendingApproval{ChatID: "111", Decision: make(chan bool, 1)})
+				client.pending.Store("request", &relay.PendingApproval{ChatID: "111", Sender: "7", Decision: make(chan bool, 1)})
 			}
 			client.dispatchUpdate(context.Background(), tgUpdate{CallbackQuery: &tgCallbackQuery{
 				ID: "callback", Data: "approve:request", Message: tgMessage{MessageID: 42, Chat: tgChat{ID: 222}},
