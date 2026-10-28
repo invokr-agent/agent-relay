@@ -97,16 +97,11 @@ func newFakeServer(t *testing.T, token string) *fakeTelegramServer {
 	return f
 }
 
-func newClient(t *testing.T, token string, allowedIDs []int64, f *fakeTelegramServer) *Client {
+func newClient(t *testing.T, token string, allowedIDs []int64, allowAll bool, f *fakeTelegramServer) *Client {
 	t.Helper()
-	return newClientAllowAll(t, token, allowedIDs, false, f)
-}
-
-func newClientAllowAll(t *testing.T, token string, allowedIDs []int64, allowAll bool, f *fakeTelegramServer) *Client {
-	t.Helper()
-	c, err := NewWithBaseURL(token, allowedIDs, allowAll, f.srv.URL)
+	c, err := newWithBaseURL(token, allowedIDs, allowAll, f.srv.URL)
 	if err != nil {
-		t.Fatalf("NewWithBaseURL: %v", err)
+		t.Fatalf("newWithBaseURL: %v", err)
 	}
 	c.senders.Store("111", fmt.Sprint(requester))
 	return c
@@ -122,7 +117,7 @@ func TestListen_AllowedChat(t *testing.T) {
 			From: &tgUser{Username: "alice"}, Text: "hello",
 		},
 	}}
-	c := newClient(t, "tok", []int64{42}, f)
+	c := newClient(t, "tok", []int64{42}, false, f)
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	ch, err := c.Listen(ctx)
@@ -145,7 +140,7 @@ func TestListen_DisallowedChat(t *testing.T) {
 		UpdateID: 1,
 		Message:  &tgMessage{MessageID: 10, Chat: tgChat{ID: 999}, Text: "hi"},
 	}}
-	c := newClient(t, "tok2", []int64{42}, f)
+	c := newClient(t, "tok2", []int64{42}, false, f)
 	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
 	defer cancel()
 	ch, _ := c.Listen(ctx)
@@ -166,7 +161,7 @@ func TestListen_EmptyAllowlistDenies(t *testing.T) {
 		UpdateID: 1,
 		Message:  &tgMessage{MessageID: 10, Chat: tgChat{ID: 999}, Text: "hi"},
 	}}
-	c := newClient(t, "tok2b", nil, f)
+	c := newClient(t, "tok2b", nil, false, f)
 	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
 	defer cancel()
 	ch, _ := c.Listen(ctx)
@@ -187,7 +182,7 @@ func TestListen_AllowAllAdmits(t *testing.T) {
 		UpdateID: 1,
 		Message:  &tgMessage{MessageID: 10, Chat: tgChat{ID: 999}, Text: "hi"},
 	}}
-	c := newClientAllowAll(t, "tok2c", nil, true, f)
+	c := newClient(t, "tok2c", nil, true, f)
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	ch, err := c.Listen(ctx)
@@ -206,7 +201,7 @@ func TestListen_AllowAllAdmits(t *testing.T) {
 
 func TestSend_ShortText(t *testing.T) {
 	f := newFakeServer(t, "tok3")
-	c := newClient(t, "tok3", nil, f)
+	c := newClient(t, "tok3", nil, false, f)
 	if err := c.Send(context.Background(), "42", "hi there"); err != nil {
 		t.Fatalf("Send: %v", err)
 	}
@@ -218,7 +213,7 @@ func TestSend_ShortText(t *testing.T) {
 // T4: send text >4096 chars — two sendMessage calls, each ≤4096 runes.
 func TestSend_LongText(t *testing.T) {
 	f := newFakeServer(t, "tok4")
-	c := newClient(t, "tok4", nil, f)
+	c := newClient(t, "tok4", nil, false, f)
 	text := strings.Repeat("a", 9000)
 	if err := c.Send(context.Background(), "42", text); err != nil {
 		t.Fatalf("Send: %v", err)
@@ -230,7 +225,7 @@ func TestSend_LongText(t *testing.T) {
 
 func TestAskApproval_Approve(t *testing.T) {
 	f := newFakeServer(t, "tok5")
-	c := newClient(t, "tok5", []int64{111}, f)
+	c := newClient(t, "tok5", []int64{111}, false, f)
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 	// Start listen loop so callbacks are processed
@@ -255,7 +250,7 @@ func TestAskApproval_Approve(t *testing.T) {
 
 func TestAskApproval_Deny(t *testing.T) {
 	f := newFakeServer(t, "tok6")
-	c := newClient(t, "tok6", []int64{111}, f)
+	c := newClient(t, "tok6", []int64{111}, false, f)
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 	_, _ = c.Listen(ctx)
@@ -280,7 +275,7 @@ func TestAskApproval_Deny(t *testing.T) {
 // it can resolve a pending approval.
 func TestAskApproval_CallbackFromDisallowedChatIgnored(t *testing.T) {
 	f := newFakeServer(t, "tok6b")
-	c := newClient(t, "tok6b", []int64{42}, f) // fake server's callback chat is 111
+	c := newClient(t, "tok6b", []int64{42}, false, f) // fake server's callback chat is 111
 	ctx, cancel := context.WithTimeout(context.Background(), 150*time.Millisecond)
 	defer cancel()
 	_, _ = c.Listen(ctx)
@@ -302,7 +297,7 @@ func TestAskApproval_CallbackFromDisallowedChatIgnored(t *testing.T) {
 // In a group any member can press the buttons; only the requester decides.
 func TestAskApproval_CallbackFromOtherGroupMemberIgnored(t *testing.T) {
 	f := newFakeServer(t, "tok6c")
-	c := newClient(t, "tok6c", []int64{111}, f)
+	c := newClient(t, "tok6c", []int64{111}, false, f)
 	ctx, cancel := context.WithTimeout(context.Background(), 150*time.Millisecond)
 	defer cancel()
 	_, _ = c.Listen(ctx)
@@ -320,7 +315,7 @@ func TestAskApproval_CallbackFromOtherGroupMemberIgnored(t *testing.T) {
 func TestAPIErrorOmitsToken(t *testing.T) {
 	srv := httptest.NewServer(http.NotFoundHandler())
 	srv.Close()
-	c, err := NewWithBaseURL("secret-token", nil, false, srv.URL)
+	c, err := newWithBaseURL("secret-token", nil, false, srv.URL)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -332,7 +327,7 @@ func TestAPIErrorOmitsToken(t *testing.T) {
 
 func TestAskApproval_Timeout(t *testing.T) {
 	f := newFakeServer(t, "tok7")
-	c := newClient(t, "tok7", nil, f)
+	c := newClient(t, "tok7", nil, false, f)
 	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
 	defer cancel()
 	approved, err := c.AskApproval(ctx, "111", relay.ApprovalRequest{ID: "req-timeout"})
@@ -346,7 +341,7 @@ func TestAskApproval_Timeout(t *testing.T) {
 
 func TestExpiredCallbackWithoutMessageIsAcknowledged(t *testing.T) {
 	f := newFakeServer(t, "expired")
-	c := newClient(t, "expired", nil, f)
+	c := newClient(t, "expired", nil, false, f)
 	c.handleCallback(context.Background(), &tgCallbackQuery{ID: "cq-expired", Data: "approve:gone"})
 	if got := f.answerCalls.Load(); got != 1 {
 		t.Fatalf("expected callback acknowledgement, got %d", got)
@@ -382,7 +377,7 @@ func TestListen_RetryOn500(t *testing.T) {
 	})
 	srv := httptest.NewServer(mux)
 	defer srv.Close()
-	c, _ := NewWithBaseURL(token, []int64{42}, false, srv.URL)
+	c, _ := newWithBaseURL(token, []int64{42}, false, srv.URL)
 	c.httpClient = &http.Client{Timeout: 5 * time.Second}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -407,7 +402,7 @@ func TestListen_AbortOn401(t *testing.T) {
 	})
 	srv := httptest.NewServer(mux)
 	defer srv.Close()
-	c, _ := NewWithBaseURL(token, nil, false, srv.URL)
+	c, _ := newWithBaseURL(token, nil, false, srv.URL)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
@@ -426,65 +421,5 @@ func TestNew_EmptyToken(t *testing.T) {
 	_, err := New("", nil, false)
 	if err == nil {
 		t.Fatal("expected error for empty token")
-	}
-}
-
-// T11: chunkMessage boundary — exactly 4096 runes → single chunk.
-func TestChunkMessage_Exact4096(t *testing.T) {
-	s := strings.Repeat("x", 4096)
-	chunks := relay.ChunkMessage(s, 4096)
-	if len(chunks) != 1 {
-		t.Fatalf("expected 1 chunk, got %d", len(chunks))
-	}
-}
-
-// T12: chunkMessage boundary — 4097 runes → two chunks.
-func TestChunkMessage_4097(t *testing.T) {
-	s := strings.Repeat("x", 4097)
-	chunks := relay.ChunkMessage(s, 4096)
-	if len(chunks) != 2 {
-		t.Fatalf("expected 2 chunks, got %d", len(chunks))
-	}
-	if len([]rune(chunks[0])) != 4096 {
-		t.Fatalf("first chunk has %d runes, want 4096", len([]rune(chunks[0])))
-	}
-	if len([]rune(chunks[1])) != 1 {
-		t.Fatalf("second chunk has %d runes, want 1", len([]rune(chunks[1])))
-	}
-}
-
-// Compile-time check that Client satisfies Client.
-var _ relay.Client = (*Client)(nil)
-
-// Reference fmt to avoid unused import.
-var _ = fmt.Sprintf
-
-func TestAllowed(t *testing.T) {
-	c, err := New("tok", []int64{42}, false)
-	if err != nil {
-		t.Fatalf("New: %v", err)
-	}
-	if !c.Allowed("42") {
-		t.Fatal("expected chat 42 to be allowed")
-	}
-	if c.Allowed("43") {
-		t.Fatal("expected chat 43 to be denied")
-	}
-	if c.Allowed("not-a-number") {
-		t.Fatal("expected non-numeric chat ID to be denied")
-	}
-	empty, err := New("tok", nil, false)
-	if err != nil {
-		t.Fatalf("New: %v", err)
-	}
-	if empty.Allowed("42") {
-		t.Fatal("expected empty allowlist to deny (fail closed)")
-	}
-	all, err := New("tok", nil, true)
-	if err != nil {
-		t.Fatalf("New: %v", err)
-	}
-	if !all.Allowed("42") {
-		t.Fatal("expected allowAll to admit any chat")
 	}
 }

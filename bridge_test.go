@@ -104,7 +104,6 @@ func newFakeClient(approve bool) *fakeClient {
 }
 
 func (f *fakeClient) Name() string                                   { return "fake" }
-func (f *fakeClient) Allowed(chatID string) bool                     { return chatID == "me" }
 func (f *fakeClient) Listen(context.Context) (<-chan Inbound, error) { return f.in, nil }
 
 func (f *fakeClient) Send(_ context.Context, _ string, text string) error {
@@ -155,10 +154,6 @@ func TestBridgeChatTurn(t *testing.T) {
 	chat.say("hi")
 	if got := chat.next(t); got != "echo: hi (s1)" {
 		t.Fatalf("reply = %q", got)
-	}
-	chat.in <- Inbound{ChatID: "stranger", Text: "hi"}
-	if got := chat.next(t); got != "Access denied." {
-		t.Fatalf("stranger got %q", got)
 	}
 }
 

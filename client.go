@@ -14,12 +14,9 @@ type Client interface {
 	// Name returns a short stable identifier used in logs ("telegram", "signal").
 	Name() string
 
-	// Allowed reports whether the given chat may use the agent. The router
-	// consults this before dispatching and replies "Access denied." when it
-	// returns false, so implementations must fail closed.
-	Allowed(chatID string) bool
-
 	// Listen starts receiving messages and sends them to the returned channel.
+	// It delivers only chats on the client's allowlist: the bridge does not
+	// check again, so implementations must fail closed.
 	// The channel is closed when ctx is cancelled or a fatal client error occurs.
 	Listen(ctx context.Context) (<-chan Inbound, error)
 
@@ -37,7 +34,6 @@ type Typer interface {
 }
 
 // ApprovalRequest carries the fields needed for a user-facing approval prompt.
-// It is a value type to avoid an import cycle with internal/approval.
 type ApprovalRequest struct {
 	ID, Tool, Summary, Details string
 }

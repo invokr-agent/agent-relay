@@ -1,14 +1,17 @@
-package relay
+// Package kit holds the helpers the chat clients share.
+package kit
 
 import (
 	"context"
 	"strings"
 	"time"
+
+	"github.com/invokr-agent/agent-relay"
 )
 
 // ApprovalPromptText renders the approval body both clients share; each
 // appends whatever reply instructions its own channel needs.
-func ApprovalPromptText(req ApprovalRequest) string {
+func ApprovalPromptText(req relay.ApprovalRequest) string {
 	var b strings.Builder
 	b.WriteString("🔧 Tool approval required\n\nTool: ")
 	b.WriteString(req.Tool)
@@ -36,11 +39,5 @@ func WaitBackoff(ctx context.Context, backoff *time.Duration, limit time.Duratio
 // Allowed reports whether key may be dispatched. Fail closed: an empty
 // allowlist admits nobody unless allowAll is set.
 func Allowed[T comparable](allowAll bool, set map[T]bool, key T) bool {
-	return allowAll || (len(set) > 0 && set[key])
-}
-
-func StartListen(ctx context.Context, loop func(context.Context, chan<- Inbound)) (<-chan Inbound, error) {
-	out := make(chan Inbound, 32)
-	go loop(ctx, out)
-	return out, nil
+	return allowAll || set[key]
 }

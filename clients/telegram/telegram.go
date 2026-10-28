@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -14,6 +15,7 @@ import (
 	"time"
 
 	"github.com/invokr-agent/agent-relay"
+	"github.com/invokr-agent/agent-relay/internal/kit"
 )
 
 const (
@@ -22,28 +24,27 @@ const (
 	maxBackoff  = 60 * time.Second
 )
 
-// Client is a Telegram Bot API long-poll client.
 var (
 	_ relay.Client = (*Client)(nil)
 	_ relay.Typer  = (*Client)(nil)
 )
 
+// Client is a Telegram Bot API long-poll client.
 type Client struct {
 	token, baseURL string
 	allowedIDs     map[int64]bool
 	allowAll       bool
 	httpClient     *http.Client
-	pending        sync.Map // map[string]*relay.PendingApproval — approval callbacks
+	pending        sync.Map // map[string]*kit.PendingApproval — approval callbacks
 	senders        sync.Map // chat ID → user ID of the chat's latest message
 }
 
 // New constructs a Client. Returns an error if token is empty.
 func New(token string, allowedChatIDs []int64, allowAll bool) (*Client, error) {
-	return NewWithBaseURL(token, allowedChatIDs, allowAll, "https://api.telegram.org")
+	return newWithBaseURL(token, allowedChatIDs, allowAll, "https://api.telegram.org")
 }
 
-// NewWithBaseURL constructs a Client with a custom base URL (for testing).
-func NewWithBaseURL(token string, allowedChatIDs []int64, allowAll bool, baseURL string) (*Client, error) {
+func newWithBaseURL(token string, allowedChatIDs []int64, allowAll bool, baseURL string) (*Client, error) {
 	if strings.TrimSpace(token) == "" {
 		return nil, fmt.Errorf("telegram: token is required")
 	}
@@ -59,17 +60,12 @@ func NewWithBaseURL(token string, allowedChatIDs []int64, allowAll bool, baseURL
 
 func (c *Client) Name() string { return "telegram" }
 
-// Allowed reports whether the chat is on the allowlist. Fail closed: a chat ID
-// that is not a valid integer is denied unless allowAll is set.
-func (c *Client) Allowed(chatID string) bool {
-	id, err := strconv.ParseInt(chatID, 10, 64)
-	return c.allowAll || (err == nil && relay.Allowed(c.allowAll, c.allowedIDs, id))
-}
-
 // Listen starts the long-poll loop. Closes the channel when ctx is cancelled
 // or a fatal error occurs (e.g. 401 Unauthorized).
 func (c *Client) Listen(ctx context.Context) (<-chan relay.Inbound, error) {
-	return relay.StartListen(ctx, c.pollLoop)
+	out := make(chan relay.Inbound, 32)
+	go c.pollLoop(ctx, out)
+	return out, nil
 }
 
 func (c *Client) pollLoop(ctx context.Context, out chan<- relay.Inbound) {
@@ -82,7 +78,7 @@ func (c *Client) pollLoop(ctx context.Context, out chan<- relay.Inbound) {
 		}
 		updates, fatal, err := c.getUpdates(ctx, offset)
 		if err != nil {
-			if fatal || !relay.WaitBackoff(ctx, &backoff, maxBackoff) {
+			if fatal || !kit.WaitBackoff(ctx, &backoff, maxBackoff) {
 				return
 			}
 			continue
@@ -99,12 +95,12 @@ func (c *Client) pollLoop(ctx context.Context, out chan<- relay.Inbound) {
 
 func (c *Client) dispatchUpdate(ctx context.Context, u tgUpdate, out chan<- relay.Inbound) {
 	if u.CallbackQuery != nil {
-		if relay.Allowed(c.allowAll, c.allowedIDs, u.CallbackQuery.Message.Chat.ID) {
+		if kit.Allowed(c.allowAll, c.allowedIDs, u.CallbackQuery.Message.Chat.ID) {
 			c.handleCallback(ctx, u.CallbackQuery)
 		}
 		return
 	}
-	if u.Message == nil || u.Message.Text == "" || !relay.Allowed(c.allowAll, c.allowedIDs, u.Message.Chat.ID) {
+	if u.Message == nil || u.Message.Text == "" || !kit.Allowed(c.allowAll, c.allowedIDs, u.Message.Chat.ID) {
 		return
 	}
 	sender := ""
@@ -131,7 +127,7 @@ func (c *Client) handleCallback(ctx context.Context, cq *tgCallbackQuery) {
 	value, ok := c.pending.Load(reqID)
 	_ = c.answerCallbackQuery(ctx, cq.ID)
 	if ok {
-		p := value.(*relay.PendingApproval)
+		p := value.(*kit.PendingApproval)
 		// In a group the chat is shared: only the user whose message led to
 		// the request may answer it.
 		if p.ChatID != strconv.FormatInt(cq.Message.Chat.ID, 10) || cq.From == nil || p.Sender != strconv.FormatInt(cq.From.ID, 10) {
@@ -148,7 +144,7 @@ func (c *Client) handleCallback(ctx context.Context, cq *tgCallbackQuery) {
 		return
 	}
 	select {
-	case value.(*relay.PendingApproval).Decision <- approved:
+	case value.(*kit.PendingApproval).Decision <- approved:
 	default:
 	}
 	label := "✅ Approved"
@@ -160,7 +156,7 @@ func (c *Client) handleCallback(ctx context.Context, cq *tgCallbackQuery) {
 
 // Send sends text to chatID, chunking at 4096 runes.
 func (c *Client) Send(ctx context.Context, chatID string, text string) error {
-	for _, chunk := range relay.ChunkMessage(text, chunkLimit) {
+	for _, chunk := range kit.ChunkMessage(text, chunkLimit) {
 		if _, err := c.sendMessage(ctx, chatID, chunk, nil); err != nil {
 			return err
 		}
@@ -173,11 +169,11 @@ func (c *Client) Send(ctx context.Context, chatID string, text string) error {
 func (c *Client) AskApproval(ctx context.Context, chatID string, req relay.ApprovalRequest) (bool, error) {
 	sender, _ := c.senders.Load(chatID)
 	senderID, _ := sender.(string)
-	return relay.AwaitApproval(ctx, &c.pending, c.Name(), chatID, senderID, req, func(req relay.ApprovalRequest) error {
+	return kit.AwaitApproval(ctx, &c.pending, c.Name(), chatID, senderID, req, func(req relay.ApprovalRequest) error {
 		markup := map[string]any{"inline_keyboard": [][]map[string]string{{
 			{"text": "✅ Approve", "callback_data": "approve:" + req.ID}, {"text": "❌ Deny", "callback_data": "deny:" + req.ID},
 		}}}
-		_, err := c.sendMessage(ctx, chatID, relay.ApprovalPromptText(req), markup)
+		_, err := c.sendMessage(ctx, chatID, kit.ApprovalPromptText(req), markup)
 		return err
 	})
 }
@@ -258,7 +254,7 @@ func (c *Client) answerCallbackQuery(ctx context.Context, queryID string) error 
 
 func (c *Client) editMessageText(ctx context.Context, chatID string, messageID int64, text string) error {
 	body := map[string]any{"chat_id": chatID, "message_id": messageID, "text": text}
-	_, _, err := c.apiPost(ctx, "editMessageText", body) //nolint:dogsled
+	_, _, err := c.apiPost(ctx, "editMessageText", body)
 	return err
 }
 
@@ -282,11 +278,11 @@ func (c *Client) apiPost(ctx context.Context, method string, body any) ([]byte, 
 		return nil, 0, fmt.Errorf("telegram: %s: %w", method, err)
 	}
 	defer func() { _ = resp.Body.Close() }()
-	var buf bytes.Buffer
-	if _, err := buf.ReadFrom(resp.Body); err != nil {
+	data, err := io.ReadAll(resp.Body)
+	if err != nil {
 		return nil, resp.StatusCode, fmt.Errorf("telegram: read %s body: %w", method, err)
 	}
-	return buf.Bytes(), resp.StatusCode, nil
+	return data, resp.StatusCode, nil
 }
 
 // --- private types ---

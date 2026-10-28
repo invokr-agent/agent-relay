@@ -1,7 +1,6 @@
 package relay
 
 import (
-	"context"
 	"os"
 	"path/filepath"
 	"testing"
@@ -9,10 +8,7 @@ import (
 
 func TestStore_EmptySessionID(t *testing.T) {
 	s := newTestStore(t)
-	id, err := s.SessionID(context.Background(), "telegram:123")
-	if err != nil {
-		t.Fatalf("SessionID: %v", err)
-	}
+	id := s.SessionID("telegram:123")
 	if id != "" {
 		t.Fatalf("expected empty, got %q", id)
 	}
@@ -20,14 +16,10 @@ func TestStore_EmptySessionID(t *testing.T) {
 
 func TestStore_SetAndGet(t *testing.T) {
 	s := newTestStore(t)
-	ctx := context.Background()
-	if err := s.SetSessionID(ctx, "telegram:123", "sess-abc"); err != nil {
+	if err := s.SetSessionID("telegram:123", "sess-abc"); err != nil {
 		t.Fatalf("SetSessionID: %v", err)
 	}
-	id, err := s.SessionID(ctx, "telegram:123")
-	if err != nil {
-		t.Fatalf("SessionID: %v", err)
-	}
+	id := s.SessionID("telegram:123")
 	if id != "sess-abc" {
 		t.Fatalf("expected sess-abc, got %q", id)
 	}
@@ -35,13 +27,9 @@ func TestStore_SetAndGet(t *testing.T) {
 
 func TestStore_UpsertOverwrites(t *testing.T) {
 	s := newTestStore(t)
-	ctx := context.Background()
-	_ = s.SetSessionID(ctx, "signal:+1", "first")
-	_ = s.SetSessionID(ctx, "signal:+1", "second")
-	id, err := s.SessionID(ctx, "signal:+1")
-	if err != nil {
-		t.Fatalf("SessionID: %v", err)
-	}
+	_ = s.SetSessionID("signal:+1", "first")
+	_ = s.SetSessionID("signal:+1", "second")
+	id := s.SessionID("signal:+1")
 	if id != "second" {
 		t.Fatalf("expected second, got %q", id)
 	}
@@ -50,22 +38,18 @@ func TestStore_UpsertOverwrites(t *testing.T) {
 func TestStore_ReloadPersists(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "messaging.json")
-	ctx := context.Background()
 	s1, err := NewStore(path)
 	if err != nil {
 		t.Fatalf("NewStore 1: %v", err)
 	}
-	if err := s1.SetSessionID(ctx, "telegram:42", "sess-42"); err != nil {
+	if err := s1.SetSessionID("telegram:42", "sess-42"); err != nil {
 		t.Fatalf("SetSessionID: %v", err)
 	}
 	s2, err := NewStore(path)
 	if err != nil {
 		t.Fatalf("NewStore 2: %v", err)
 	}
-	id, err := s2.SessionID(ctx, "telegram:42")
-	if err != nil {
-		t.Fatalf("SessionID: %v", err)
-	}
+	id := s2.SessionID("telegram:42")
 	if id != "sess-42" {
 		t.Fatalf("expected sess-42 after reload, got %q", id)
 	}
@@ -87,7 +71,7 @@ func TestStore_FileModeIs0600(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewStore: %v", err)
 	}
-	if err := s.SetSessionID(context.Background(), "telegram:1", "sess-1"); err != nil {
+	if err := s.SetSessionID("telegram:1", "sess-1"); err != nil {
 		t.Fatalf("SetSessionID: %v", err)
 	}
 	info, err := os.Stat(path)
@@ -101,7 +85,7 @@ func TestStore_FileModeIs0600(t *testing.T) {
 	if err := os.Chmod(path, 0o644); err != nil {
 		t.Fatalf("Chmod: %v", err)
 	}
-	if err := s.SetSessionID(context.Background(), "telegram:2", "sess-2"); err != nil {
+	if err := s.SetSessionID("telegram:2", "sess-2"); err != nil {
 		t.Fatalf("SetSessionID: %v", err)
 	}
 	info, err = os.Stat(path)
@@ -123,8 +107,7 @@ func TestStore_MergesIntoExistingEntries(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewStore: %v", err)
 	}
-	ctx := context.Background()
-	if err := s.SetSessionID(ctx, "telegram:3", "sess-3"); err != nil {
+	if err := s.SetSessionID("telegram:3", "sess-3"); err != nil {
 		t.Fatalf("SetSessionID: %v", err)
 	}
 	reloaded, err := NewStore(path)
@@ -137,10 +120,7 @@ func TestStore_MergesIntoExistingEntries(t *testing.T) {
 		"telegram:3": "sess-3",
 	}
 	for key, expected := range want {
-		got, err := reloaded.SessionID(ctx, key)
-		if err != nil {
-			t.Fatalf("SessionID(%s): %v", key, err)
-		}
+		got := reloaded.SessionID(key)
 		if got != expected {
 			t.Fatalf("SessionID(%s) = %q, want %q", key, got, expected)
 		}

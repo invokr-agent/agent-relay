@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/invokr-agent/agent-relay"
+	"github.com/invokr-agent/agent-relay/internal/kit"
 )
 
 func pipeDialer() (func(string, string) (net.Conn, error), net.Conn) {
@@ -52,12 +53,7 @@ func consumeSubscribe(conn net.Conn) {
 	_, _ = conn.Write([]byte(ack))
 }
 
-func newTestClient(t *testing.T, allowed []string) (*Client, net.Conn) {
-	t.Helper()
-	return newTestClientAllowAll(t, allowed, false)
-}
-
-func newTestClientAllowAll(t *testing.T, allowed []string, allowAll bool) (*Client, net.Conn) {
+func newTestClient(t *testing.T, allowed []string, allowAll bool) (*Client, net.Conn) {
 	t.Helper()
 	dialer, server := pipeDialer()
 	var c *Client
@@ -138,7 +134,7 @@ func TestNew_PreservesNotificationBeforeSubscribeAck(t *testing.T) {
 }
 
 func TestListen_AllowedNumber(t *testing.T) {
-	c, server := newTestClient(t, []string{"+12025551234"})
+	c, server := newTestClient(t, []string{"+12025551234"}, false)
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	ch, _ := c.Listen(ctx)
@@ -155,7 +151,7 @@ func TestListen_AllowedNumber(t *testing.T) {
 
 // S3: inbound from blocked number — nothing on channel.
 func TestListen_BlockedNumber(t *testing.T) {
-	c, server := newTestClient(t, []string{"+1allowed"})
+	c, server := newTestClient(t, []string{"+1allowed"}, false)
 	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
 	defer cancel()
 	ch, _ := c.Listen(ctx)
@@ -172,7 +168,7 @@ func TestListen_BlockedNumber(t *testing.T) {
 
 // S3b: empty allowlist denies everyone (fail closed).
 func TestListen_EmptyAllowlistDenies(t *testing.T) {
-	c, server := newTestClient(t, nil)
+	c, server := newTestClient(t, nil, false)
 	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
 	defer cancel()
 	ch, _ := c.Listen(ctx)
@@ -189,7 +185,7 @@ func TestListen_EmptyAllowlistDenies(t *testing.T) {
 
 // S3c: allow_all admits numbers not on any allowlist.
 func TestListen_AllowAllAdmits(t *testing.T) {
-	c, server := newTestClientAllowAll(t, nil, true)
+	c, server := newTestClient(t, nil, true)
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	ch, _ := c.Listen(ctx)
@@ -206,7 +202,7 @@ func TestListen_AllowAllAdmits(t *testing.T) {
 
 // S4: Send method — correct JSON-RPC call with recipient array.
 func TestSend_RPCCall(t *testing.T) {
-	c, server := newTestClient(t, nil)
+	c, server := newTestClient(t, nil, false)
 	defer func() { _ = server.Close() }()
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
@@ -238,7 +234,7 @@ func TestSend_RPCCall(t *testing.T) {
 }
 
 func TestSetTyping_StartAndStop(t *testing.T) {
-	c, server := newTestClient(t, nil)
+	c, server := newTestClient(t, nil, false)
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 	_, _ = c.Listen(ctx)
@@ -272,7 +268,7 @@ func TestSetTyping_StartAndStop(t *testing.T) {
 }
 
 func TestAskApproval_YES(t *testing.T) {
-	c, server := newTestClient(t, nil)
+	c, server := newTestClient(t, nil, false)
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 	_, _ = c.Listen(ctx)
@@ -301,7 +297,7 @@ func TestAskApproval_YES(t *testing.T) {
 }
 
 func TestAskApproval_RegistersBeforeSendingPrompt(t *testing.T) {
-	c, server := newTestClient(t, nil)
+	c, server := newTestClient(t, nil, false)
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 	_, _ = c.Listen(ctx)
@@ -330,8 +326,8 @@ func TestAskApproval_RegistersBeforeSendingPrompt(t *testing.T) {
 
 func TestApprovalRepliesRouteByRequestID(t *testing.T) {
 	c := &Client{}
-	first := &relay.PendingApproval{ChatID: "+1test", Decision: make(chan bool, 1)}
-	second := &relay.PendingApproval{ChatID: "+1test", Decision: make(chan bool, 1)}
+	first := &kit.PendingApproval{ChatID: "+1test", Decision: make(chan bool, 1)}
+	second := &kit.PendingApproval{ChatID: "+1test", Decision: make(chan bool, 1)}
 	c.pending.Store("req-1", first)
 	c.pending.Store("req-2", second)
 
@@ -361,7 +357,7 @@ func TestApprovalRepliesRouteByRequestID(t *testing.T) {
 }
 
 func TestAskApproval_NO(t *testing.T) {
-	c, server := newTestClient(t, nil)
+	c, server := newTestClient(t, nil, false)
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 	_, _ = c.Listen(ctx)
@@ -390,7 +386,7 @@ func TestAskApproval_NO(t *testing.T) {
 }
 
 func TestAskApproval_Cancel(t *testing.T) {
-	c, server := newTestClient(t, nil)
+	c, server := newTestClient(t, nil, false)
 	defer func() { _ = server.Close() }()
 	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
 	defer cancel()
@@ -410,7 +406,7 @@ func TestAskApproval_Cancel(t *testing.T) {
 
 // S9: Long message chunked at 2000 runes.
 func TestSend_LongMessage(t *testing.T) {
-	c, server := newTestClient(t, nil)
+	c, server := newTestClient(t, nil, false)
 	defer func() { _ = server.Close() }()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -532,27 +528,6 @@ func TestListen_ReconnectsAfterCleanEOF(t *testing.T) {
 	}
 }
 
-// Compile-time check.
-var _ relay.Client = (*Client)(nil)
-
-func TestAllowed(t *testing.T) {
-	c := &Client{allowedNumbers: map[string]bool{"+1test": true}}
-	if !c.Allowed("+1test") {
-		t.Fatal("expected +1test to be allowed")
-	}
-	if c.Allowed("+2other") {
-		t.Fatal("expected +2other to be denied")
-	}
-	empty := &Client{allowedNumbers: map[string]bool{}}
-	if empty.Allowed("+1test") {
-		t.Fatal("expected empty allowlist to deny (fail closed)")
-	}
-	all := &Client{allowAll: true}
-	if !all.Allowed("+anyone") {
-		t.Fatal("expected allowAll to admit any number")
-	}
-}
-
 func writeEnvelope(conn net.Conn, envelope map[string]any) {
 	raw, _ := json.Marshal(map[string]any{"jsonrpc": "2.0", "method": "receive", "params": map[string]any{"envelope": envelope}})
 	_, _ = conn.Write(append(raw, '\n'))
@@ -561,7 +536,7 @@ func writeEnvelope(conn net.Conn, envelope map[string]any) {
 // Newer signal-cli sends a UUID as source; the number is in sourceNumber.
 // Group messages are skipped rather than answered as DMs.
 func TestListen_SourceNumberAndGroups(t *testing.T) {
-	c, server := newTestClient(t, []string{"+1allowed"})
+	c, server := newTestClient(t, []string{"+1allowed"}, false)
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	ch, _ := c.Listen(ctx)
@@ -583,7 +558,7 @@ func TestListen_SourceNumberAndGroups(t *testing.T) {
 
 // Lines past bufio.Scanner's 64 KiB default must not kill the connection.
 func TestListen_LongLine(t *testing.T) {
-	c, server := newTestClient(t, []string{"+1allowed"})
+	c, server := newTestClient(t, []string{"+1allowed"}, false)
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	ch, _ := c.Listen(ctx)
@@ -603,7 +578,7 @@ func TestListen_LongLine(t *testing.T) {
 func TestSend_TimesOutWithoutResponse(t *testing.T) {
 	defer func(d time.Duration) { rpcTimeout = d }(rpcTimeout)
 	rpcTimeout = 50 * time.Millisecond
-	c, server := newTestClient(t, nil)
+	c, server := newTestClient(t, nil, false)
 	go func() { _, _ = io.Copy(io.Discard, server) }()
 	done := make(chan error, 1)
 	go func() { done <- c.Send(context.Background(), "+1", "hi") }()

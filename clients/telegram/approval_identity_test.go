@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/invokr-agent/agent-relay"
+	"github.com/invokr-agent/agent-relay/internal/kit"
 )
 
 func TestApprovalIdentityAndCleanup(t *testing.T) {
@@ -21,7 +22,7 @@ func TestApprovalIdentityAndCleanup(t *testing.T) {
 			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 			defer cancel()
 			var client *Client
-			replacement := &relay.PendingApproval{ChatID: "222", Decision: make(chan bool, 1)}
+			replacement := &kit.PendingApproval{ChatID: "222", Decision: make(chan bool, 1)}
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				if !strings.HasSuffix(r.URL.Path, "/sendMessage") {
 					_, _ = fmt.Fprint(w, `{"ok":true,"result":true}`)
@@ -67,7 +68,7 @@ func TestApprovalIdentityAndCleanup(t *testing.T) {
 			}))
 			defer server.Close()
 			var err error
-			client, err = NewWithBaseURL("identity", []int64{111, 222}, false, server.URL)
+			client, err = newWithBaseURL("identity", []int64{111, 222}, false, server.URL)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -126,12 +127,12 @@ func TestUnacceptedCallbacksNeverClaimDecision(t *testing.T) {
 				_, _ = fmt.Fprint(w, `{"ok":true,"result":true}`)
 			}))
 			defer server.Close()
-			client, err := NewWithBaseURL("neutral", []int64{111, 222}, false, server.URL)
+			client, err := newWithBaseURL("neutral", []int64{111, 222}, false, server.URL)
 			if err != nil {
 				t.Fatal(err)
 			}
 			if scenario == "wrong peer" {
-				client.pending.Store("request", &relay.PendingApproval{ChatID: "111", Sender: "7", Decision: make(chan bool, 1)})
+				client.pending.Store("request", &kit.PendingApproval{ChatID: "111", Sender: "7", Decision: make(chan bool, 1)})
 			}
 			client.dispatchUpdate(context.Background(), tgUpdate{CallbackQuery: &tgCallbackQuery{
 				ID: "callback", Data: "approve:request", Message: tgMessage{MessageID: 42, Chat: tgChat{ID: 222}},

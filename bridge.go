@@ -33,8 +33,8 @@ type Bridge struct {
 
 	conn      *acp.ClientConn
 	canLoad   bool
-	chats     sync.Map // chat key → *chat
-	sessions  sync.Map // acp.SessionID → *chat
+	chats     map[string]*chat // chat key → chat; Run's goroutine only
+	sessions  sync.Map         // acp.SessionID → *chat
 	approvals atomic.Int64
 }
 
@@ -62,6 +62,9 @@ func (c *chat) setSession(id acp.SessionID) {
 
 // Run spawns agent, then serves every client until ctx ends.
 func (b *Bridge) Run(ctx context.Context, agent *exec.Cmd) error {
+	if b.Logger == nil {
+		b.Logger = slog.Default()
+	}
 	if len(b.Clients) == 0 {
 		return errors.New("messaging: no clients configured")
 	}
@@ -70,13 +73,9 @@ func (b *Bridge) Run(ctx context.Context, agent *exec.Cmd) error {
 		return fmt.Errorf("messaging: start agent: %w", err)
 	}
 	defer func() { _ = conn.Close() }()
-	b.conn = conn
-	init, err := conn.Initialize(ctx, acp.InitializeRequest{ProtocolVersion: acp.V1,
-		ClientInfo: &acp.Implementation{Name: "agent-relay", Version: "0.1.0"}})
-	if err != nil {
-		return fmt.Errorf("messaging: initialize agent: %w", err)
+	if err := b.initialize(ctx, conn); err != nil {
+		return err
 	}
-	b.canLoad = init.AgentCapabilities != nil && init.AgentCapabilities.LoadSession
 	inbound, stopped, err := b.listen(ctx)
 	if err != nil {
 		return err
@@ -96,6 +95,18 @@ func (b *Bridge) Run(ctx context.Context, agent *exec.Cmd) error {
 			b.route(ctx, in.t, in.msg)
 		}
 	}
+}
+
+func (b *Bridge) initialize(ctx context.Context, conn *acp.ClientConn) error {
+	b.conn = conn
+	init, err := conn.Initialize(ctx, acp.InitializeRequest{ProtocolVersion: acp.V1,
+		ClientInfo: &acp.Implementation{Name: "agent-relay", Version: "0.1.0"}})
+	if err != nil {
+		return fmt.Errorf("messaging: initialize agent: %w", err)
+	}
+	b.chats = map[string]*chat{}
+	b.canLoad = init.AgentCapabilities != nil && init.AgentCapabilities.LoadSession
+	return nil
 }
 
 type delivery struct {
@@ -137,18 +148,18 @@ func notify(ctx context.Context, t Client, chatID, text string) {
 }
 
 func (b *Bridge) route(ctx context.Context, t Client, msg Inbound) {
-	if !t.Allowed(msg.ChatID) {
-		notify(ctx, t, msg.ChatID, "Access denied.")
-		return
-	}
 	key := t.Name() + ":" + msg.ChatID
-	v, loaded := b.chats.LoadOrStore(key, &chat{key: key, id: msg.ChatID, t: t, inbox: make(chan string, inboxCap)})
-	c := v.(*chat)
-	if !loaded {
+	c, ok := b.chats[key]
+	if !ok {
+		c = &chat{key: key, id: msg.ChatID, t: t, inbox: make(chan string, inboxCap)}
+		b.chats[key] = c
 		go b.serve(ctx, c)
 	}
 	// /cancel cannot wait behind the turn it stops.
 	if strings.TrimSpace(msg.Text) == "/cancel" {
+		if c.current() == "" {
+			return
+		}
 		if err := b.conn.Cancel(ctx, acp.CancelNotification{SessionID: c.current()}); err != nil {
 			b.Logger.Warn("cancel failed", "chat", key, "err", err)
 		}
@@ -209,7 +220,7 @@ func (b *Bridge) handle(ctx context.Context, c *chat, text string) error {
 // openSession resumes the chat's stored session when the agent can load it,
 // and otherwise starts a fresh one.
 func (b *Bridge) openSession(ctx context.Context, c *chat) error {
-	stored, _ := b.Store.SessionID(ctx, c.key)
+	stored := b.Store.SessionID(c.key)
 	if stored == "" || !b.canLoad {
 		return b.newSession(ctx, c)
 	}
@@ -237,7 +248,7 @@ func (b *Bridge) newSession(ctx context.Context, c *chat) error {
 	b.sessions.Delete(c.current())
 	c.setSession(resp.SessionID)
 	b.sessions.Store(resp.SessionID, c)
-	return b.Store.SetSessionID(ctx, c.key, string(resp.SessionID))
+	return b.Store.SetSessionID(c.key, string(resp.SessionID))
 }
 
 // sendReply posts the turn's streamed answer as one message (chunked to the
@@ -288,15 +299,20 @@ func (b *Bridge) RequestPermission(ctx context.Context, req acp.RequestPermissio
 		return acp.RequestPermissionResponse{}, fmt.Errorf("permission request for unknown session %s", req.SessionID)
 	}
 	c := v.(*chat)
-	ctx, cancel := context.WithTimeout(ctx, approvalTimeout)
+	askCtx, cancel := context.WithTimeout(ctx, approvalTimeout)
 	defer cancel()
-	approved, err := c.t.AskApproval(ctx, c.id, ApprovalRequest{
+	approved, err := c.t.AskApproval(askCtx, c.id, ApprovalRequest{
 		// The counter alone: Telegram caps callback_data at 64 bytes.
 		ID:      fmt.Sprint(b.approvals.Add(1)),
 		Tool:    cmp.Or(req.ToolCall.Title, req.ToolCall.Name, string(req.ToolCall.ToolCallID)),
 		Summary: string(req.ToolCall.Kind),
 		Details: string(req.ToolCall.RawInput),
 	})
+	cancelled := acp.RequestPermissionResponse{Outcome: acp.RequestPermissionOutcome{Cancelled: &acp.RequestPermissionOutcomeCancelled{}}}
+	if err != nil && ctx.Err() == nil && errors.Is(err, context.DeadlineExceeded) {
+		_ = c.t.Send(ctx, c.id, "approval timed out")
+		return cancelled, nil
+	}
 	if err != nil {
 		return acp.RequestPermissionResponse{}, err
 	}
@@ -312,7 +328,7 @@ func (b *Bridge) RequestPermission(ctx context.Context, req acp.RequestPermissio
 			}
 		}
 	}
-	return acp.RequestPermissionResponse{Outcome: acp.RequestPermissionOutcome{Cancelled: &acp.RequestPermissionOutcomeCancelled{}}}, nil
+	return cancelled, nil
 }
 
 // typing keeps the client's typing indicator on, when it has one, until stop.

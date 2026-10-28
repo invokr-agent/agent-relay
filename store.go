@@ -1,7 +1,6 @@
 package relay
 
 import (
-	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -44,16 +43,16 @@ func NewStore(path string) (*Store, error) {
 }
 
 // SessionID returns the stored session ID for the chat key, or "" if none.
-func (s *Store) SessionID(_ context.Context, chatKey string) (string, error) {
+func (s *Store) SessionID(chatKey string) string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.sessions[chatKey], nil
+	return s.sessions[chatKey]
 }
 
 // SetSessionID upserts the session ID for the given chat key and persists the
 // whole map. A failed write rolls back the in-memory entry so the store never
 // reports a mapping that is not on disk.
-func (s *Store) SetSessionID(_ context.Context, chatKey string, sessionID string) error {
+func (s *Store) SetSessionID(chatKey string, sessionID string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	previous, had := s.sessions[chatKey]
