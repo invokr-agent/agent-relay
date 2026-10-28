@@ -1,6 +1,7 @@
 // Command agent-relay bridges Telegram and Signal chats to an ACP agent.
 //
 //	agent-relay [-config path]
+//	agent-relay setup [--describe [client] | --apply client | client]
 //
 // The config (default $XDG_CONFIG_HOME/agent-relay/config.json) names the
 // agent argv to spawn and the clients to serve:
@@ -40,6 +41,13 @@ import (
 var version = "dev"
 
 func main() {
+	if len(os.Args) > 1 && os.Args[1] == "setup" {
+		if err := runSetup(os.Args[2:], os.Stdin, os.Stdout); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		return
+	}
 	path := flag.String("config", config.Path(), "config file")
 	showVersion := flag.Bool("version", false, "print the version and exit")
 	flag.Parse()

@@ -3,8 +3,8 @@ package relay
 import (
 	"cmp"
 	"context"
-	"errors"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -47,16 +47,16 @@ type Bridge struct {
 }
 
 type chat struct {
-	key, id string
-	t       Client
-	inbox   chan Inbound
-	session acp.SessionID
+	key, id  string
+	t        Client
+	inbox    chan Inbound
+	session  acp.SessionID
 	approver string // SenderID of the running turn's message
-	window  time.Time
-	count   int // messages since window; Run's goroutine only
-	mu      sync.Mutex
-	reply   strings.Builder
-	loading bool // a session/load replay is running: its updates are history, not news
+	window   time.Time
+	count    int // messages since window; Run's goroutine only
+	mu       sync.Mutex
+	reply    strings.Builder
+	loading  bool // a session/load replay is running: its updates are history, not news
 }
 
 func (c *chat) current() acp.SessionID {

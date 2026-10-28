@@ -8,7 +8,7 @@ type Inbound struct {
 	// SenderID is the stable ID of the user who sent the message; that user
 	// alone may answer the approvals of the turn it starts.
 	SenderID string
-	Text   string
+	Text     string
 }
 
 // Client is implemented by each messaging backend.

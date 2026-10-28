@@ -10,6 +10,16 @@ Chat with a coding agent from Telegram or Signal. agent-relay is an [ACP](https:
   - `/cancel` stops the running turn.
   - Other text, including the agent's own `/commands`, goes to the agent as the prompt.
 
+## Setup
+
+```
+agent-relay setup [telegram|signal]        # interactive prompts
+agent-relay setup --describe [client]      # descriptors as JSON ("setup_protocol": 1)
+agent-relay setup --apply telegram <answers.json
+```
+
+`--apply` validates the answers, verifies them (Telegram `getMe`, a signal-cli ping), stores secrets, and merges the rest into the config. Secrets are never printed. Front ends such as invokr drive `--describe`/`--apply`; the `setup` Go package holds the same logic without UI.
+
 ## Run
 
 ```
