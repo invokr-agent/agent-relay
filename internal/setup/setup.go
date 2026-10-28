@@ -5,6 +5,7 @@ package setup
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"path/filepath"
 	"regexp"
@@ -22,6 +23,7 @@ const Protocol = 1
 // Field is one answer a client needs.
 type Field struct {
 	Key      string `json:"key"`
+	Type     string `json:"type,omitempty"` // "list": the answer is a JSON array of strings
 	Label    string `json:"label"`
 	Help     string `json:"help,omitempty"`
 	Secret   bool   `json:"secret,omitempty"`
@@ -38,10 +40,11 @@ type Descriptor struct {
 	Notice  string  `json:"notice,omitempty"`
 }
 
-// Answers maps Field.Key to the user's answer.
+// Answers maps Field.Key to the user's answer; a "list" field's answer is
+// its JSON array text.
 type Answers map[string]string
 
-var agentField = Field{Key: "agent", Label: "Agent command", Help: "ACP agent argv, space-separated, run without a shell (e.g. invokr acp)"}
+var agentField = Field{Key: "agent", Label: "Agent command", Type: "list", Help: `ACP agent argv, run without a shell: a JSON array (e.g. ["invokr","acp"]); interactive setup splits on spaces`}
 
 var descriptors = []Descriptor{
 	{Client: "telegram", Pairing: "code", Notice: "Telegram is not end-to-end encrypted; prefer Signal for sensitive work.",
@@ -141,7 +144,11 @@ func Apply(ctx context.Context, path, client string, a Answers) error {
 	if err != nil {
 		return err
 	}
-	if argv := strings.Fields(a["agent"]); len(argv) > 0 {
+	var argv []string
+	if a["agent"] != "" && (json.Unmarshal([]byte(a["agent"]), &argv) != nil || len(argv) == 0) {
+		return &FieldError{"agent", "must be a non-empty JSON array of strings"}
+	}
+	if len(argv) > 0 {
 		cfg.Agent = argv
 	} else if len(cfg.Agent) == 0 {
 		return &FieldError{"agent", "is required"}

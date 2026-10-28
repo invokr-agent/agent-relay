@@ -103,7 +103,7 @@ func (c *Client) dispatchUpdate(ctx context.Context, u tgapi.Update, out chan<- 
 		return
 	}
 	select {
-	case out <- relay.Inbound{ChatID: strconv.FormatInt(u.Message.Chat.ID, 10), Sender: u.Message.From.Username,
+	case out <- relay.Inbound{ChatID: strconv.FormatInt(u.Message.Chat.ID, 10),
 		SenderID: strconv.FormatInt(u.Message.From.ID, 10), Text: u.Message.Text}:
 	case <-ctx.Done():
 	}

@@ -1,4 +1,4 @@
-package signal
+package signalrpc
 
 import (
 	"net"

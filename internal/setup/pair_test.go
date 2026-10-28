@@ -34,6 +34,9 @@ func TestMatchCode(t *testing.T) {
 			t.Fatal("group or stale message paired")
 		}
 	}
+	if matchCode(update(t, "private", 8, issued, "/startABCD2345"), code, issued, attempts) != nil {
+		t.Fatal("/start without a space paired")
+	}
 	if matchCode(update(t, "private", 7, issued, "/start abcd2345 "), code, issued, attempts) == nil {
 		t.Fatal("right code refused")
 	}

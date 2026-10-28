@@ -319,3 +319,35 @@ func TestBridgeListenerStopped(t *testing.T) {
 		t.Fatalf("Run = %v", err)
 	}
 }
+
+// staleClient approves, but only after the bridge has moved to the next turn.
+type staleClient struct {
+	*fakeClient
+	c *chat
+}
+
+func (s staleClient) AskApproval(ctx context.Context, chatID string, req ApprovalRequest) (bool, error) {
+	s.c.set(func() { s.c.approver = "u2" })
+	s.c.turn.Add(2)
+	return s.fakeClient.AskApproval(ctx, chatID, req)
+}
+
+// A permission request is never bound to a sender outside its own turn.
+func TestBridgePermissionOutsideTurnDenied(t *testing.T) {
+	req := acp.RequestPermissionRequest{SessionID: "s1", Options: []acp.PermissionOption{
+		{OptionID: "yes", Kind: acp.PermissionOptionKindAllowOnce}, {OptionID: "no", Kind: acp.PermissionOptionKindRejectOnce}}}
+	for name, approver := range map[string]string{"no turn": "", "previous turn": "u1"} {
+		client := newFakeClient(true)
+		c := &chat{key: "fake:me", id: "me", approver: approver}
+		c.t = staleClient{client, c}
+		b := &Bridge{Logger: slog.New(slog.DiscardHandler)}
+		b.sessions.Store(acp.SessionID("s1"), c)
+		resp, err := b.RequestPermission(context.Background(), req)
+		if err != nil || resp.Outcome.Selected == nil || resp.Outcome.Selected.OptionID != "no" {
+			t.Fatalf("%s: outcome %+v, err %v", name, resp.Outcome, err)
+		}
+		if asked := len(client.asked); (approver == "") != (asked == 0) {
+			t.Fatalf("%s: asked %d times", name, asked)
+		}
+	}
+}

@@ -10,10 +10,9 @@ import (
 	"strings"
 	"time"
 
-	_ "github.com/invokr-agent/agent-relay/clients/signal"
 	"github.com/invokr-agent/agent-relay/internal/config"
-	"github.com/invokr-agent/agent-relay/internal/kit"
 	"github.com/invokr-agent/agent-relay/internal/secrets"
+	"github.com/invokr-agent/agent-relay/internal/signalrpc"
 	"github.com/invokr-agent/agent-relay/internal/tgapi"
 )
 
@@ -144,7 +143,11 @@ func matchCode(u tgapi.Update, code string, issued int64, attempts map[int64]int
 	if attempts[m.From.ID]++; attempts[m.From.ID] > maxAttempts {
 		return nil
 	}
-	text := strings.ToUpper(strings.TrimSpace(strings.TrimPrefix(m.Text, "/start")))
+	text := strings.TrimSpace(m.Text)
+	if rest, ok := strings.CutPrefix(text, "/start "); ok {
+		text = rest
+	}
+	text = strings.ToUpper(strings.TrimSpace(text))
 	if subtle.ConstantTimeCompare([]byte(text), []byte(code)) != 1 {
 		return nil
 	}
@@ -159,7 +162,7 @@ func pairSignal(ctx context.Context, s *config.Signal, emit func(Event)) error {
 	if s.Account != "" {
 		return fmt.Errorf("setup: signal is already linked as %s; clear account to link another phone", s.Account)
 	}
-	call, closeConn, err := kit.SignalRPC(ctx, s.Socket)
+	call, closeConn, err := signalrpc.Open(ctx, s.Socket)
 	if err != nil {
 		return fmt.Errorf("setup: %w", err)
 	}

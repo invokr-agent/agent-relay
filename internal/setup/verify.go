@@ -7,8 +7,7 @@ import (
 	"fmt"
 	"net/http"
 
-	_ "github.com/invokr-agent/agent-relay/clients/signal"
-	"github.com/invokr-agent/agent-relay/internal/kit"
+	"github.com/invokr-agent/agent-relay/internal/signalrpc"
 	"github.com/invokr-agent/agent-relay/internal/tgapi"
 )
 
@@ -35,7 +34,7 @@ func telegramMe(ctx context.Context, token string) (tgapi.User, error) {
 // signalPing checks the socket is the user's own and that signal-cli answers
 // its JSON-RPC "version" method.
 func signalPing(ctx context.Context, socket string) error {
-	call, closeConn, err := kit.SignalRPC(ctx, socket)
+	call, closeConn, err := signalrpc.Open(ctx, socket)
 	if err != nil {
 		return fmt.Errorf("setup: %w", err)
 	}

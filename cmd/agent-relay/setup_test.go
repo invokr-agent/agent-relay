@@ -45,6 +45,7 @@ func TestSetupApplyReportsJSON(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	for in, field := range map[string]string{
 		`{"token":"x","bogus":"y"}`:        "bogus",
+		`{"token":"x","agent":7}`:          "agent",
 		`{"token":"x"} {}`:                 "",
 		strings.Repeat(" ", 70<<10) + `{}`: "",
 	} {

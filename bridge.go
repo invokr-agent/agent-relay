@@ -34,6 +34,7 @@ type Bridge struct {
 	// RateLimit caps the messages a chat may send per minute; 0 means 20.
 	RateLimit int
 	Audit     *slog.Logger
+	Version   string // reported to the agent as ClientInfo
 
 	conn      *acp.ClientConn
 	canLoad   bool
@@ -47,7 +48,8 @@ type chat struct {
 	t        Client
 	inbox    chan Inbound
 	session  acp.SessionID
-	approver string // SenderID of the running turn's message
+	approver string       // SenderID of the prompt in flight; "" between prompts
+	turn     atomic.Int64 // bumped as each prompt starts and ends: an answer outliving its prompt is refused
 	window   time.Time
 	count    int // messages since window; Run's goroutine only
 	mu       sync.Mutex
@@ -107,7 +109,7 @@ func (b *Bridge) Run(ctx context.Context, agent *exec.Cmd) error {
 func (b *Bridge) initialize(ctx context.Context, conn *acp.ClientConn) error {
 	b.conn, b.chats = conn, map[string]*chat{}
 	init, err := conn.Initialize(ctx, acp.InitializeRequest{ProtocolVersion: acp.V1,
-		ClientInfo: &acp.Implementation{Name: "agent-relay", Version: "0.1.0"}})
+		ClientInfo: &acp.Implementation{Name: "agent-relay", Version: b.Version}})
 	if err != nil {
 		return fmt.Errorf("messaging: initialize agent: %w", err)
 	}
@@ -200,11 +202,7 @@ func (b *Bridge) serve(ctx context.Context, c *chat) {
 		case <-ctx.Done():
 			return
 		case msg := <-c.inbox:
-			c.set(func() { c.approver = msg.SenderID })
-			err := b.handle(ctx, c, strings.TrimSpace(msg.Text))
-			// A permission request arriving after the turn has nobody to ask.
-			c.set(func() { c.approver = "" })
-			if err != nil {
+			if err := b.handle(ctx, c, msg); err != nil {
 				b.Logger.Error("turn failed", "chat", c.key, "err", err)
 				// The error stays in the log: its text can carry secrets
 				// (a client's request URL) that must not reach the chat.
@@ -214,7 +212,8 @@ func (b *Bridge) serve(ctx context.Context, c *chat) {
 	}
 }
 
-func (b *Bridge) handle(ctx context.Context, c *chat, text string) error {
+func (b *Bridge) handle(ctx context.Context, c *chat, msg Inbound) error {
+	text := strings.TrimSpace(msg.Text)
 	if text == "/new" {
 		if err := b.newSession(ctx, c); err != nil {
 			return err
@@ -229,8 +228,12 @@ func (b *Bridge) handle(ctx context.Context, c *chat, text string) error {
 	// Drop text left by an earlier failed turn so it does not lead this reply.
 	c.set(c.reply.Reset)
 	stop := b.typing(ctx, c)
+	c.turn.Add(1)
+	c.set(func() { c.approver = msg.SenderID })
 	resp, err := b.conn.Prompt(ctx, acp.PromptRequest{SessionID: c.current(),
 		Prompt: []acp.ContentBlock{{Text: &acp.TextContent{Text: text}}}})
+	c.set(func() { c.approver = "" })
+	c.turn.Add(1)
 	stop()
 	if err != nil {
 		return err
@@ -303,8 +306,9 @@ func (b *Bridge) SessionUpdate(_ context.Context, n acp.SessionNotification) err
 	return nil
 }
 
-// RequestPermission asks the chat. A yes picks the agent's allow-once option
-// (or allow-always), a no its reject-once (or reject-always).
+// RequestPermission asks the chat's approver of the prompt in flight; a
+// request with no prompt in flight, or answered after its prompt ended, is
+// denied.
 func (b *Bridge) RequestPermission(ctx context.Context, req acp.RequestPermissionRequest) (acp.RequestPermissionResponse, error) {
 	v, ok := b.sessions.Load(req.SessionID)
 	if !ok {
@@ -312,8 +316,12 @@ func (b *Bridge) RequestPermission(ctx context.Context, req acp.RequestPermissio
 	}
 	c := v.(*chat)
 	c.mu.Lock()
-	approver := c.approver
+	approver, turn := c.approver, c.turn.Load()
 	c.mu.Unlock()
+	if approver == "" {
+		b.Logger.Warn("permission request outside a turn; denied", "chat", c.key)
+		return choose(req, false), nil
+	}
 	askCtx, cancel := context.WithTimeout(ctx, approvalTimeout)
 	defer cancel()
 	tool := cmp.Or(req.ToolCall.Title, req.ToolCall.Name, string(req.ToolCall.ToolCallID))
@@ -336,10 +344,16 @@ func (b *Bridge) RequestPermission(ctx context.Context, req acp.RequestPermissio
 	case err != nil:
 		b.audit(c, ar, "error: "+err.Error())
 		return acp.RequestPermissionResponse{}, err
-	case approved:
+	case approved && c.turn.Load() == turn:
 		decision = "approved"
 	}
 	b.audit(c, ar, decision)
+	return choose(req, decision == "approved"), nil
+}
+
+// choose picks the agent's allow-once option (or allow-always) when approved,
+// else its reject-once (or reject-always).
+func choose(req acp.RequestPermissionRequest, approved bool) acp.RequestPermissionResponse {
 	kinds := []acp.PermissionOptionKind{acp.PermissionOptionKindRejectOnce, acp.PermissionOptionKindRejectAlways}
 	if approved {
 		kinds = []acp.PermissionOptionKind{acp.PermissionOptionKindAllowOnce, acp.PermissionOptionKindAllowAlways}
@@ -348,11 +362,11 @@ func (b *Bridge) RequestPermission(ctx context.Context, req acp.RequestPermissio
 		for _, o := range req.Options {
 			if o.Kind == kind {
 				return acp.RequestPermissionResponse{Outcome: acp.RequestPermissionOutcome{
-					Selected: &acp.SelectedPermissionOutcome{OptionID: o.OptionID}}}, nil
+					Selected: &acp.SelectedPermissionOutcome{OptionID: o.OptionID}}}
 			}
 		}
 	}
-	return acp.RequestPermissionResponse{Outcome: acp.RequestPermissionOutcome{Cancelled: &acp.RequestPermissionOutcomeCancelled{}}}, nil
+	return acp.RequestPermissionResponse{Outcome: acp.RequestPermissionOutcome{Cancelled: &acp.RequestPermissionOutcomeCancelled{}}}
 }
 
 func (b *Bridge) audit(c *chat, req ApprovalRequest, decision string) {

@@ -98,10 +98,16 @@ func jsonMode(args []string) string {
 func applyJSON(path, client string, stdin io.Reader) error {
 	ctx, cancel := context.WithTimeout(context.Background(), verifyTimeout)
 	defer cancel()
-	var answers setup.Answers
+	var raw map[string]json.RawMessage
 	dec := json.NewDecoder(io.LimitReader(stdin, maxAnswers))
-	if err := dec.Decode(&answers); err != nil || dec.More() {
-		return errors.New("setup: answers must be one JSON object of strings, at most 64 KiB")
+	if err := dec.Decode(&raw); err != nil || dec.More() {
+		return errors.New("setup: answers must be one JSON object, at most 64 KiB")
+	}
+	answers := setup.Answers{}
+	for k, v := range raw {
+		s := string(v) // a non-string (a list) is kept as its JSON text
+		_ = json.Unmarshal(v, &s)
+		answers[k] = s
 	}
 	return setup.Apply(ctx, path, client, answers)
 }
@@ -124,7 +130,12 @@ func interactive(path, client string, in io.Reader, out io.Writer) error {
 	answers := setup.Answers{}
 	for _, f := range d[0].Fields {
 		_, _ = fmt.Fprintf(out, "%s (%s): ", f.Label, f.Help)
-		if v := readAnswer(in, out, f.Secret); v != "" {
+		v := readAnswer(in, out, f.Secret)
+		if f.Type == "list" && v != "" {
+			b, _ := json.Marshal(strings.Fields(v))
+			v = string(b)
+		}
+		if v != "" {
 			answers[f.Key] = v
 		}
 	}

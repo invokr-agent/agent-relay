@@ -60,3 +60,22 @@ func TestSymlinkedFileRefused(t *testing.T) {
 		t.Fatal("symlinked secrets file read")
 	}
 }
+
+// A token rotated into the keyring is not shadowed by an older file copy.
+func TestKeyringSetDropsFileCopy(t *testing.T) {
+	keyring.MockInitWithError(errors.New("no keyring"))
+	dir := t.TempDir()
+	if _, err := Set(dir, "x", "old"); err != nil {
+		t.Fatal(err)
+	}
+	keyring.MockInit()
+	if in, err := Set(dir, "x", "new"); !in || err != nil {
+		t.Fatalf("Set = %v, %v", in, err)
+	}
+	if v, _ := Get(dir, "x"); v != "new" || InFile(dir, "x") {
+		t.Fatalf("Get = %q, in file %v", v, InFile(dir, "x"))
+	}
+	if fi, err := os.Stat(file(dir)); err != nil || fi.Mode() != 0o600 {
+		t.Fatalf("secrets file: %v %v", fi, err)
+	}
+}

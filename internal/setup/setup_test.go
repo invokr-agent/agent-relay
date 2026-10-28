@@ -78,12 +78,12 @@ func TestApplyTelegram(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	fakeTelegram(t, getMe)
 	path := config.Path()
-	err := Apply(context.Background(), path, "telegram", Answers{"token": token, "allowed_user_ids": "7, 8, 7", "agent": "invokr acp"})
+	err := Apply(context.Background(), path, "telegram", Answers{"token": token, "allowed_user_ids": "7, 8, 7", "agent": `["invokr acp", "--x"]`})
 	if err != nil {
 		t.Fatal(err)
 	}
 	cfg, _ := config.Load(path)
-	if ids := cfg.Telegram.AllowedUserIDs; len(ids) != 2 || cfg.Agent[1] != "acp" {
+	if ids := cfg.Telegram.AllowedUserIDs; len(ids) != 2 || cfg.Agent[0] != "invokr acp" || cfg.Agent[1] != "--x" {
 		t.Fatalf("config = %+v", cfg)
 	}
 	if data, _ := os.ReadFile(path); strings.Contains(string(data), token) {
@@ -156,7 +156,7 @@ func TestApplySignal(t *testing.T) {
 	sock := fakeSignal(t, func(string) []string {
 		return []string{`{"jsonrpc":"2.0","method":"receive","params":{}}`, `{"jsonrpc":"2.0","id":1,"result":{"version":"0.13"}}`}
 	})
-	err := Apply(context.Background(), config.Path(), "signal", Answers{"socket": sock, "allowed_numbers": "+1555, +1666,+1555", "agent": "a"})
+	err := Apply(context.Background(), config.Path(), "signal", Answers{"socket": sock, "allowed_numbers": "+1555, +1666,+1555", "agent": `["a"]`})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -192,7 +192,8 @@ func TestApplyRejectsUnknownAndOverflow(t *testing.T) {
 	fakeTelegram(t, getMe)
 	for key, a := range map[string]Answers{
 		"bogus":            {"token": token, "bogus": "s3cret"},
-		"allowed_user_ids": {"token": token, "allowed_user_ids": "99999999999999999999", "agent": "a"},
+		"agent":            {"token": token, "agent": "invokr acp"},
+		"allowed_user_ids": {"token": token, "allowed_user_ids": "99999999999999999999", "agent": `["a"]`},
 	} {
 		err := Apply(context.Background(), config.Path(), "telegram", a)
 		fe, ok := errors.AsType[*FieldError](err)

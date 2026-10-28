@@ -46,22 +46,28 @@ func Get(dir, name string) (string, error) {
 }
 
 // Set stores the secret in the keyring, falling back to the file when no
-// keyring is reachable (e.g. a headless systemd --user session). It reports
-// whether the keyring took it.
+// keyring is reachable (e.g. a headless systemd --user session). A keyring
+// write drops the name from the file, whose copy Get would read first. It
+// reports whether the keyring took it.
 func Set(dir, name, value string) (inKeyring bool, err error) {
-	if keyring.Set(service, name, value) == nil {
-		return true, nil
-	}
+	inKeyring = keyring.Set(service, name, value) == nil
 	m, err := readFile(dir)
 	if err != nil {
-		return false, err
+		return inKeyring, err
 	}
-	m[name] = value
+	if _, ok := m[name]; inKeyring && !ok {
+		return true, nil
+	}
+	if inKeyring {
+		delete(m, name)
+	} else {
+		m[name] = value
+	}
 	data, err := json.Marshal(m)
 	if err != nil {
-		return false, err
+		return inKeyring, err
 	}
-	return false, config.WriteFile(file(dir), data)
+	return inKeyring, config.WriteFile(file(dir), data)
 }
 
 func readFile(dir string) (map[string]string, error) {

@@ -25,7 +25,7 @@ agent-relay setup --apply telegram <answers.json
 
 **Protocol.** `--describe` and `--apply` write exactly one JSON document to stdout, `--pair` an event stream; this holds for every failure too (bad flags, unknown client), and nothing is repeated on stderr. Exit status is 0 on success, 1 on any error. Documents carry `"setup_protocol":1` and `"ok"`; a failure adds `"error"` and, for a bad answer, `"field":"<key>"`. `--describe` lists `clients`; a secret field already stored has `"stored":true` and may be left out.
 
-`--apply` reads one JSON object of strings (at most 64 KiB; unknown keys refused). Field `pattern`s are Go RE2 regexps matched against the trimmed answer; a list answer replaces the stored list (`""` clears it), an omitted key keeps it. `agent` is required until the config has one. It validates the answers, verifies them (Telegram `getMe`, a signal-cli ping), merges them into the config, then stores secrets. Secrets are never printed. Front ends such as invokr drive `--describe`/`--apply`; the internal `setup` package holds the same logic without UI.
+`--apply` reads one JSON object (at most 64 KiB; unknown keys refused) of strings, except that a field with `"type":"list"` takes a JSON array of strings: `"agent": ["invokr", "acp"]`. Interactive setup splits the agent command on spaces, so an argument containing spaces needs `--apply` or the config file. Field `pattern`s are Go RE2 regexps matched against the trimmed answer; a list answer replaces the stored list (`""` clears it), an omitted key keeps it. `agent` is required until the config has one. It validates the answers, verifies them (Telegram `getMe`, a signal-cli ping), merges them into the config, then stores secrets. Secrets are never printed. Front ends such as invokr drive `--describe`/`--apply`; the internal `setup` package holds the same logic without UI.
 
 ## Run
 
@@ -46,10 +46,10 @@ agent-relay   # reads $XDG_CONFIG_HOME/agent-relay/config.json
 
 - **Config:** written 0600 in a 0700 directory. `version` is the schema; changes are additive. A version 0 file (`token`, `allowed_chat_ids`) is migrated on start: the token moves to the secret store, private chat IDs become user IDs.
 - **Secrets:** the Telegram token is kept in the OS keyring, or `secrets.json` (0600) beside the config when no keyring is reachable. `AGENT_RELAY_TELEGRAM_TOKEN` overrides both.
-- **Access:** Telegram admits the listed user IDs in private chats only, unless `allow_groups`; Signal admits the listed numbers. An empty list admits nobody. Telegram is not end-to-end encrypted: prefer Signal for sensitive work.
+- **Access:** Telegram admits the listed user IDs in private chats only, unless `allow_groups`; Signal admits the listed numbers. An empty list admits nobody. With `allow_groups`, every allow-listed member of a group shares one session and its agent, so trust them alike. Telegram is not end-to-end encrypted: prefer Signal for sensitive work.
 - **Approvals:** only the user whose message started the turn can answer; an unanswered prompt denies. Every decision is appended to `audit_log` (default `audit.log` beside the config).
 - **Rate limit:** `rate_limit` messages per chat per minute (default 20); the rest are dropped.
-- **Agent:** `agent` is an argv, run without a shell. The session map (`store`, default `sessions.json` beside the config) is 0600.
+- **Agent:** `agent` is an argv, run without a shell. Dropping `AGENT_RELAY_*` from its environment is not isolation: the agent runs as your user and can read the config, `secrets.json` and your keyring; sandbox it yourself if that matters. The session map (`store`, default `sessions.json` beside the config) is 0600.
 - **Signal:** needs [signal-cli](https://github.com/AsamK/signal-cli) in JSON-RPC mode on a Unix socket owned by the same user.
 
 ## Service

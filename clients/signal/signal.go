@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"io"
 	"net"
-	"os"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -16,14 +15,13 @@ import (
 
 	relay "github.com/invokr-agent/agent-relay"
 	"github.com/invokr-agent/agent-relay/internal/kit"
+	"github.com/invokr-agent/agent-relay/internal/signalrpc"
 )
 
 const (
 	chunkLimit    = 2000
-	dialTimeout   = 5 * time.Second
 	maxBackoff    = 60 * time.Second
 	reconnectWait = 2 * time.Second
-	maxLine       = 1 << 20
 )
 
 // rpcTimeout bounds one call: a connection dropped after the write would
@@ -46,9 +44,8 @@ type Client struct {
 	mu             sync.Mutex
 	nextID         atomic.Int64
 	pending        sync.Map // map[request ID]*kit.PendingApproval
-	pendingRPC     sync.Map // map[int64]chan rpcMessage
+	pendingRPC     sync.Map // map[int64]chan signalrpc.Message
 	dialer         func(network, address string) (net.Conn, error)
-	connDone       chan struct{} // closed when a dialRPC connection ends
 }
 
 // New dials the UNIX socket and sends subscribeReceive. Only allowedNumbers
@@ -60,27 +57,7 @@ type Client struct {
 // without --account (as after pairing), and enables Note to Self: messages
 // the account's owner sends to themselves from the phone reach the relay.
 func New(socketPath, account string, allowedNumbers []string) (*Client, error) {
-	return newWithDialer(socketPath, account, allowedNumbers, dial)
-}
-
-// dial connects to signal-cli's socket and refuses a peer running as another
-// user, which could impersonate signal-cli. The check is on the connected
-// peer, not the path, so swapping the socket file cannot race it.
-func dial(network, path string) (net.Conn, error) {
-	conn, err := (&net.Dialer{Timeout: dialTimeout}).Dial(network, path)
-	if err != nil {
-		return nil, err
-	}
-	uc, ok := conn.(*net.UnixConn)
-	uid := -1
-	if ok {
-		uid, err = peerUID(uc)
-	}
-	if err != nil || uid != os.Getuid() {
-		_ = conn.Close()
-		return nil, fmt.Errorf("signal: %s is not served by this user", path)
-	}
-	return conn, nil
+	return newWithDialer(socketPath, account, allowedNumbers, signalrpc.Dial)
 }
 
 func newWithDialer(socketPath, account string, allowedNumbers []string, dialer func(string, string) (net.Conn, error)) (*Client, error) {
@@ -99,37 +76,6 @@ func newWithDialer(socketPath, account string, allowedNumbers []string, dialer f
 		return nil, err
 	}
 	return c, nil
-}
-
-func init() { kit.SignalRPC = dialRPC }
-
-// dialRPC connects for one-off JSON-RPC calls, without subscribing to
-// messages. The connection ends with ctx or Close. Calls have no timeout
-// beyond ctx.
-func dialRPC(ctx context.Context, socketPath string) (func(string, map[string]any, any) error, func() error, error) {
-	conn, err := dial("unix", socketPath)
-	if err != nil {
-		return nil, nil, fmt.Errorf("signal: dial %s: %w", socketPath, err)
-	}
-	c := &Client{socketPath: socketPath, conn: conn, connDone: make(chan struct{})}
-	stop := context.AfterFunc(ctx, func() { _ = conn.Close() })
-	go func() {
-		defer close(c.connDone)
-		defer stop()
-		scanner := bufio.NewScanner(conn)
-		scanner.Buffer(nil, maxLine)
-		for scanner.Scan() {
-			c.dispatchLine(ctx, scanner.Bytes(), nil)
-		}
-	}()
-	call := func(method string, params map[string]any, result any) error {
-		raw, err := c.call(ctx, method, params)
-		if err != nil {
-			return err
-		}
-		return json.Unmarshal(raw, result)
-	}
-	return call, conn.Close, nil
 }
 
 func (c *Client) Name() string { return "signal" }
@@ -200,21 +146,6 @@ func (c *Client) readConn(ctx context.Context, scanner *bufio.Scanner, buffered 
 	return io.EOF
 }
 
-type rpcMessage struct {
-	ID     *int64          `json:"id"`
-	Method string          `json:"method"`
-	Params json.RawMessage `json:"params"`
-	Result json.RawMessage `json:"result"`
-	Error  *rpcError       `json:"error"`
-}
-
-type rpcError struct {
-	Code    int    `json:"code"`
-	Message string `json:"message"`
-}
-
-func (e *rpcError) Error() string { return fmt.Sprintf("rpc error %d: %s", e.Code, e.Message) }
-
 type signalMessage struct {
 	Message           string          `json:"message"`
 	GroupInfo         json.RawMessage `json:"groupInfo"`
@@ -259,7 +190,7 @@ func (c *Client) withAccount(params map[string]any) map[string]any {
 }
 
 func (c *Client) dispatchLine(ctx context.Context, line []byte, out chan<- relay.Inbound) {
-	var notif rpcMessage
+	var notif signalrpc.Message
 	if err := json.Unmarshal(line, &notif); err != nil {
 		return
 	}
@@ -267,7 +198,7 @@ func (c *Client) dispatchLine(ctx context.Context, line []byte, out chan<- relay
 	if notif.ID != nil {
 		if v, ok := c.pendingRPC.Load(*notif.ID); ok {
 			select {
-			case v.(chan rpcMessage) <- notif:
+			case v.(chan signalrpc.Message) <- notif:
 			default:
 			}
 		}
@@ -288,7 +219,7 @@ func (c *Client) dispatchLine(ctx context.Context, line []byte, out chan<- relay
 		return
 	}
 	select {
-	case out <- relay.Inbound{ChatID: source, Sender: source, SenderID: source, Text: text}:
+	case out <- relay.Inbound{ChatID: source, SenderID: source, Text: text}:
 	case <-ctx.Done():
 	}
 }
@@ -374,14 +305,6 @@ func buildApprovalPrompt(req relay.ApprovalRequest) string {
 		"\n\nReply YES <id> to approve or NO <id> to deny (bare YES/NO works when one request is pending).\nReply ID: " + req.ID
 }
 
-func rpcFrame(id int64, method string, params any) ([]byte, error) {
-	raw, err := json.Marshal(map[string]any{"jsonrpc": "2.0", "id": id, "method": method, "params": params})
-	if err != nil {
-		return nil, fmt.Errorf("signal: marshal rpc: %w", err)
-	}
-	return append(raw, '\n'), nil
-}
-
 func (c *Client) rpc(ctx context.Context, method string, params map[string]any) (json.RawMessage, error) {
 	ctx, cancel := context.WithTimeout(ctx, rpcTimeout)
 	defer cancel()
@@ -390,12 +313,8 @@ func (c *Client) rpc(ctx context.Context, method string, params map[string]any) 
 
 func (c *Client) call(ctx context.Context, method string, params map[string]any) (json.RawMessage, error) {
 	id := c.nextID.Add(1)
-	raw, err := rpcFrame(id, method, c.withAccount(params))
-	if err != nil {
-		return nil, err
-	}
-
-	ch := make(chan rpcMessage, 1)
+	raw := signalrpc.Frame(id, method, c.withAccount(params))
+	ch := make(chan signalrpc.Message, 1)
 	c.pendingRPC.Store(id, ch)
 	defer c.pendingRPC.Delete(id)
 
@@ -414,8 +333,6 @@ func (c *Client) call(ctx context.Context, method string, params map[string]any)
 			return nil, fmt.Errorf("signal: %w", res.Error)
 		}
 		return res.Result, nil
-	case <-c.connDone:
-		return nil, fmt.Errorf("signal: rpc %s: connection closed", method)
 	case <-ctx.Done():
 		return nil, fmt.Errorf("signal: rpc %s: %w", method, ctx.Err())
 	}
@@ -423,13 +340,13 @@ func (c *Client) call(ctx context.Context, method string, params map[string]any)
 
 func (c *Client) subscribe() error {
 	id := c.nextID.Add(1)
-	raw, _ := rpcFrame(id, "subscribeReceive", c.withAccount(map[string]any{}))
+	raw := signalrpc.Frame(id, "subscribeReceive", c.withAccount(map[string]any{}))
 
 	c.mu.Lock()
 	conn := c.conn
 	c.mu.Unlock()
 
-	if err := conn.SetDeadline(time.Now().Add(dialTimeout)); err != nil {
+	if err := conn.SetDeadline(time.Now().Add(signalrpc.DialTimeout)); err != nil {
 		return fmt.Errorf("signal: set deadline: %w", err)
 	}
 	defer func() { _ = conn.SetDeadline(time.Time{}) }()
@@ -438,7 +355,7 @@ func (c *Client) subscribe() error {
 		return fmt.Errorf("signal: subscribe write: %w", err)
 	}
 	scanner := bufio.NewScanner(conn)
-	scanner.Buffer(nil, maxLine)
+	scanner.Buffer(nil, signalrpc.MaxLine)
 	buffered, err := c.readSubscribeAck(scanner, id)
 	if err != nil {
 		return err
@@ -455,7 +372,7 @@ func (c *Client) readSubscribeAck(scanner *bufio.Scanner, id int64) ([][]byte, e
 	var buffered [][]byte
 	for scanner.Scan() {
 		line := append([]byte(nil), scanner.Bytes()...)
-		var env rpcMessage
+		var env signalrpc.Message
 		if err := json.Unmarshal(line, &env); err != nil || env.ID == nil || *env.ID != id {
 			buffered = append(buffered, line)
 			continue

@@ -15,6 +15,7 @@ import (
 
 	relay "github.com/invokr-agent/agent-relay"
 	"github.com/invokr-agent/agent-relay/internal/kit"
+	"github.com/invokr-agent/agent-relay/internal/signalrpc"
 )
 
 func pipeDialer() (func(string, string) (net.Conn, error), net.Conn) {
@@ -192,7 +193,7 @@ func TestDialChecksPeer(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer func() { _ = l.Close() }()
-	conn, err := dial("unix", path)
+	conn, err := signalrpc.Dial("unix", path)
 	if err != nil {
 		t.Fatalf("own socket refused: %v", err)
 	}
@@ -202,7 +203,7 @@ func TestDialChecksPeer(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer func() { _ = tcp.Close() }()
-	if _, err := dial("tcp", tcp.Addr().String()); err == nil {
+	if _, err := signalrpc.Dial("tcp", tcp.Addr().String()); err == nil {
 		t.Fatal("non-Unix peer accepted")
 	}
 }
