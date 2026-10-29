@@ -26,6 +26,7 @@ type Config struct {
 	RateLimit int       `json:"rate_limit,omitempty"` // messages per chat per minute
 	Telegram  *Telegram `json:"telegram,omitempty"`
 	Signal    *Signal   `json:"signal,omitempty"`
+	Matrix    *Matrix   `json:"matrix,omitempty"`
 }
 
 // Telegram's bot token is a secret, kept out of this file.
@@ -43,6 +44,14 @@ type Signal struct {
 	Account        string   `json:"account,omitempty"`
 	AllowedNumbers []string `json:"allowed_numbers"`
 	LegacyAllowAll bool     `json:"allow_all,omitempty"` // version 0, read for migration only
+}
+
+// Matrix's access token is a secret, kept out of this file.
+type Matrix struct {
+	Homeserver   string   `json:"homeserver"`
+	UserID       string   `json:"user_id"`
+	AllowedUsers []string `json:"allowed_users"`
+	AllowGroups  bool     `json:"allow_groups,omitempty"`
 }
 
 // Dir is $XDG_CONFIG_HOME/agent-relay, defaulting to ~/.config/agent-relay.

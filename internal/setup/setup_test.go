@@ -242,3 +242,38 @@ func TestApplyMigratesLegacyToken(t *testing.T) {
 		t.Fatal("token not migrated")
 	}
 }
+
+func TestApplyMatrix(t *testing.T) {
+	keyring.MockInit()
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/_matrix/client/v3/account/whoami" || r.Header.Get("Authorization") != "Bearer mx-token" {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		_, _ = w.Write([]byte(`{"user_id":"@bot:hs"}`))
+	}))
+	defer srv.Close()
+	path := config.Path()
+	a := Answers{"homeserver": srv.URL + "/", "user_id": "@bot:hs", "access_token": "bad", "allowed_users": "@a:hs, @b:hs", "agent": `["x"]`}
+	for key, want := range map[string]string{"access_token": "access_token", "user_id": "user_id", "": ""} {
+		a["access_token"], a["user_id"] = "mx-token", "@bot:hs"
+		if key != "" {
+			a[key] = map[string]string{"access_token": "bad", "user_id": "@other:hs"}[key]
+		}
+		err := Apply(context.Background(), path, "matrix", a)
+		if fe, _ := errors.AsType[*FieldError](err); fe == nil && want != "" || fe != nil && fe.Key != want {
+			t.Fatalf("%s: %v", key, err)
+		}
+	}
+	cfg, _ := config.Load(path)
+	if m := cfg.Matrix; m.Homeserver != srv.URL || len(m.AllowedUsers) != 2 {
+		t.Fatalf("config = %+v", m)
+	}
+	if v, _ := secrets.Get(config.Dir(), secrets.MatrixToken); v != "mx-token" {
+		t.Fatal("token not stored")
+	}
+	if d, _ := Describe(path, "matrix"); !d[0].Fields[2].Stored {
+		t.Fatalf("stored token described as %+v", d[0].Fields[2])
+	}
+}

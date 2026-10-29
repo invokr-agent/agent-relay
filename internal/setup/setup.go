@@ -60,6 +60,14 @@ var descriptors = []Descriptor{
 			{Key: "allowed_numbers", Label: "Allowed numbers", Help: "comma-separated; replaces the list", Pattern: `^(\+[0-9]+)(, *\+[0-9]+)*$|^$`},
 			agentField,
 		}},
+	{Client: "matrix", Pairing: "code", Notice: "agent-relay reads unencrypted rooms only: start the chat with end-to-end encryption off.",
+		Fields: []Field{
+			{Key: "homeserver", Label: "Homeserver URL", Help: "https://…, or http:// on localhost", Required: true, Pattern: `^(https://[^/\s]+|http://(localhost|127\.0\.0\.1|\[::1\])(:[0-9]+)?)/?$`},
+			{Key: "user_id", Label: "Bot user ID", Help: "like @relay:example.org", Required: true, Pattern: `^@[^:\s]+:\S+$`},
+			{Key: "access_token", Label: "Access token", Help: "of the bot account", Secret: true, Required: true},
+			{Key: "allowed_users", Label: "Allowed users", Help: "comma-separated user IDs; replaces the list; or pair later", Pattern: `^(@[^:\s,]+:[^\s,]+)?(, *@[^:\s,]+:[^\s,]+)*$`},
+			agentField,
+		}},
 }
 
 // FieldError reports a bad answer by its key, never its value.
@@ -70,21 +78,29 @@ func (e *FieldError) Error() string { return "setup: " + e.Key + " " + e.Problem
 // Describe returns copies of every client's descriptor, or only client's,
 // for the config at path.
 func Describe(path, client string) ([]Descriptor, error) {
-	_, err := secrets.Get(filepath.Dir(path), secrets.TelegramToken)
 	var out []Descriptor
 	for _, d := range descriptors {
 		if client == "" || d.Client == client {
-			d.Fields = slices.Clone(d.Fields)
-			if d.Client == "telegram" && err == nil {
-				d.Fields[0].Required, d.Fields[0].Stored = false, true
-			}
-			out = append(out, d)
+			out = append(out, withStored(path, d))
 		}
 	}
 	if len(out) == 0 {
 		return nil, fmt.Errorf("setup: unknown client %q", client)
 	}
 	return out, nil
+}
+
+func withStored(path string, d Descriptor) Descriptor {
+	d.Fields = slices.Clone(d.Fields)
+	for i, f := range d.Fields {
+		if !f.Secret {
+			continue
+		}
+		if _, err := secrets.Get(filepath.Dir(path), d.Client+"_"+f.Key); err == nil {
+			d.Fields[i].Required, d.Fields[i].Stored = false, true
+		}
+	}
+	return d
 }
 
 // validate checks trimmed answers against client's fields; unknown keys are
@@ -111,19 +127,24 @@ func validate(path, client string, a Answers) error {
 	return nil
 }
 
-// verify checks the answers work: Telegram's token with getMe, Signal's
-// socket with a ping.
+// verify checks the answers work: Telegram's token with getMe, Matrix's
+// with whoami, Signal's socket with a ping.
 func verify(ctx context.Context, path, client string, a Answers) error {
-	if client == "telegram" {
-		token := a["token"]
-		if token == "" {
-			token, _ = secrets.Get(filepath.Dir(path), secrets.TelegramToken)
-		}
-		_, err := telegramMe(ctx, token)
-		return err
+	if client == "signal" {
+		return signalPing(ctx, a["socket"])
 	}
-	return signalPing(ctx, a["socket"])
+	token := a[secretKey[client]]
+	if token == "" {
+		token, _ = secrets.Get(filepath.Dir(path), client+"_"+secretKey[client])
+	}
+	if client == "matrix" {
+		return matrixVerify(ctx, a["homeserver"], a["user_id"], token)
+	}
+	_, err := telegramMe(ctx, token)
+	return err
 }
+
+var secretKey = map[string]string{"telegram": "token", "matrix": "access_token"}
 
 // Apply validates and verifies the answers, then writes the config before
 // the secret: a failed secret write leaves a config that fails closed (no
@@ -153,16 +174,28 @@ func Apply(ctx context.Context, path, client string, a Answers) error {
 	} else if len(cfg.Agent) == 0 {
 		return &FieldError{"agent", "is required"}
 	}
-	switch client {
-	case "telegram":
-		return applyTelegram(&cfg, path, a)
-	default:
-		applySignal(&cfg, a)
-		return config.Save(path, cfg)
-	}
+	return save(path, &cfg, client, a)
 }
 
-func applyTelegram(cfg *config.Config, path string, a Answers) error {
+func save(path string, cfg *config.Config, client string, a Answers) error {
+	switch client {
+	case "telegram":
+		if err := applyTelegram(cfg, a); err != nil {
+			return err
+		}
+	case "matrix":
+		applyMatrix(cfg, a)
+	default:
+		applySignal(cfg, a)
+	}
+	if err := config.Save(path, *cfg); err != nil || a[secretKey[client]] == "" {
+		return err
+	}
+	_, err := secrets.Set(filepath.Dir(path), client+"_"+secretKey[client], a[secretKey[client]])
+	return err
+}
+
+func applyTelegram(cfg *config.Config, a Answers) error {
 	if cfg.Telegram == nil {
 		cfg.Telegram = &config.Telegram{}
 	}
@@ -176,11 +209,20 @@ func applyTelegram(cfg *config.Config, path string, a Answers) error {
 			cfg.Telegram.AllowedUserIDs = appendNew(cfg.Telegram.AllowedUserIDs, id)
 		}
 	}
-	if err := config.Save(path, *cfg); err != nil || a["token"] == "" {
-		return err
+	return nil
+}
+
+func applyMatrix(cfg *config.Config, a Answers) {
+	if cfg.Matrix == nil {
+		cfg.Matrix = &config.Matrix{}
 	}
-	_, err := secrets.Set(filepath.Dir(path), secrets.TelegramToken, a["token"])
-	return err
+	cfg.Matrix.Homeserver, cfg.Matrix.UserID = strings.TrimRight(a["homeserver"], "/"), a["user_id"]
+	if list, ok := a["allowed_users"]; ok {
+		cfg.Matrix.AllowedUsers = []string{}
+		for _, u := range splitList(list) {
+			cfg.Matrix.AllowedUsers = appendNew(cfg.Matrix.AllowedUsers, u)
+		}
+	}
 }
 
 func applySignal(cfg *config.Config, a Answers) {

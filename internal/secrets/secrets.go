@@ -19,6 +19,9 @@ const service = "agent-relay"
 // TelegramToken names the Telegram bot token.
 const TelegramToken = "telegram_token"
 
+// MatrixToken names the Matrix access token.
+const MatrixToken = "matrix_access_token"
+
 // ErrNotFound reports a secret set nowhere.
 var ErrNotFound = errors.New("secret not found")
 

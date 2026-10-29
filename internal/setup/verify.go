@@ -6,7 +6,10 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"strings"
+	"time"
 
+	"github.com/invokr-agent/agent-relay/internal/mxapi"
 	"github.com/invokr-agent/agent-relay/internal/signalrpc"
 	"github.com/invokr-agent/agent-relay/internal/tgapi"
 )
@@ -45,6 +48,23 @@ func signalPing(ctx context.Context, socket string) error {
 	defer func() { _ = closeConn() }()
 	if err := call("version", map[string]any{}, &json.RawMessage{}); err != nil {
 		return fmt.Errorf("setup: %w", err)
+	}
+	return nil
+}
+
+// matrixAPI is the client setup talks to homeservers with.
+var matrixAPI = &http.Client{Timeout: 30 * time.Second}
+
+// matrixVerify checks the access token belongs to userID.
+func matrixVerify(ctx context.Context, homeserver, userID, token string) error {
+	me, err := mxapi.API{HC: matrixAPI, Homeserver: strings.TrimRight(homeserver, "/"), AccessToken: token}.WhoAmI(ctx)
+	switch {
+	case mxapi.Unauthorized(err):
+		return &FieldError{"access_token", "was refused by the homeserver"}
+	case err != nil:
+		return fmt.Errorf("setup: %w", err)
+	case me != userID:
+		return &FieldError{"user_id", "does not match the access token"}
 	}
 	return nil
 }

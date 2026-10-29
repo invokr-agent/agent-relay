@@ -121,7 +121,7 @@ func applyJSON(path, client string, stdin io.Reader) error {
 // the terminal reads and line reads never split stdin between them.
 func interactive(path, client string, in io.Reader, out io.Writer) error {
 	if client == "" {
-		_, _ = fmt.Fprint(out, "Client (telegram, signal): ")
+		_, _ = fmt.Fprint(out, "Client (telegram, matrix, signal): ")
 		client = readLine(in)
 	}
 	d, _ := setup.Describe(path, client)
