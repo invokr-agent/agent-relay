@@ -165,10 +165,17 @@ func (b *Bridge) route(ctx context.Context, t Client, msg Inbound) {
 	}
 	// /cancel cannot wait behind the turn it stops, nor behind the rate limit.
 	if strings.TrimSpace(msg.Text) == "/cancel" {
-		if c.current() == "" {
+		var id acp.SessionID
+		c.set(func() {
+			if c.approver != "" {
+				id = c.session
+			}
+		})
+		if id == "" {
+			notify(ctx, t, msg.ChatID, "Nothing to cancel.")
 			return
 		}
-		if err := b.conn.Cancel(ctx, acp.CancelNotification{SessionID: c.current()}); err != nil {
+		if err := b.conn.Cancel(ctx, acp.CancelNotification{SessionID: id}); err != nil {
 			b.Logger.Warn("cancel failed", "chat", key, "err", err)
 		}
 		return
@@ -327,7 +334,7 @@ func (b *Bridge) RequestPermission(ctx context.Context, req acp.RequestPermissio
 		// The counter alone: Telegram caps callback_data at 64 bytes.
 		ID:       fmt.Sprint(b.approvals.Add(1)),
 		Tool:     tool,
-		Summary:  string(req.ToolCall.Kind),
+		Kind:     string(req.ToolCall.Kind),
 		Details:  string(req.ToolCall.RawInput),
 		Approver: approver,
 	}
@@ -377,7 +384,7 @@ func (b *Bridge) audit(c *chat, req ApprovalRequest, decision string) {
 		details = strings.ToValidUTF8(details[:auditDetailsMax], "") + "…"
 	}
 	b.Audit.Info("approval", "chat", c.key, "approver", req.Approver, "tool", req.Tool,
-		"summary", req.Summary, "details", details, "decision", decision)
+		"kind", req.Kind, "details", details, "decision", decision)
 }
 
 func (b *Bridge) typing(ctx context.Context, c *chat) (stop func()) {

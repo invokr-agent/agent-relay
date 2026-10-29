@@ -1,4 +1,4 @@
-// Command agent-relay bridges Telegram and Signal chats to an ACP agent.
+// Command agent-relay bridges Telegram, Matrix and Signal chats to an ACP agent.
 //
 //	agent-relay [-config path]
 //	agent-relay setup [--describe [client] | --apply client | --pair client | client]
@@ -15,8 +15,9 @@
 //	  "signal": {"socket": "/run/user/1000/signal-cli/socket", "allowed_numbers": ["+15551234567"]}
 //	}
 //
-// The Telegram token lives in the OS keyring (or a 0600 file);
-// AGENT_RELAY_TELEGRAM_TOKEN overrides it.
+// The Telegram token and Matrix access token live in the OS keyring (or a
+// 0600 file); AGENT_RELAY_TELEGRAM_TOKEN and AGENT_RELAY_MATRIX_ACCESS_TOKEN
+// override them.
 package main
 
 import (
@@ -34,6 +35,7 @@ import (
 	"syscall"
 
 	relay "github.com/invokr-agent/agent-relay"
+	"github.com/invokr-agent/agent-relay/clients/matrix"
 	signalcli "github.com/invokr-agent/agent-relay/clients/signal"
 	"github.com/invokr-agent/agent-relay/clients/telegram"
 	"github.com/invokr-agent/agent-relay/internal/config"
@@ -98,6 +100,21 @@ func run(path string, logger *slog.Logger) error {
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	info := []any{"agent", cfg.Agent[0]}
+	if t := cfg.Telegram; t != nil {
+		bot, err := clients[0].(*telegram.Client).Username(ctx)
+		if err != nil {
+			bot = "? (" + err.Error() + ")"
+		}
+		info = append(info, "telegram_bot", "@"+bot, "telegram_users", len(t.AllowedUserIDs))
+	}
+	if s := cfg.Signal; s != nil {
+		info = append(info, "signal_account", s.Account)
+	}
+	if m := cfg.Matrix; m != nil {
+		info = append(info, "matrix_user", m.UserID, "matrix_users", len(m.AllowedUsers))
+	}
+	logger.Info("agent-relay starting", info...)
 	agent := exec.CommandContext(ctx, cfg.Agent[0], cfg.Agent[1:]...)
 	agent.Stderr = os.Stderr
 	agent.Env = agentEnv(os.Environ())
@@ -143,6 +160,17 @@ func buildClients(cfg config.Config, dir string) ([]relay.Client, error) {
 			return nil, fmt.Errorf("telegram token: %w (run agent-relay setup)", err)
 		}
 		c, err := telegram.New(token, t.AllowedUserIDs, t.AllowGroups)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, c)
+	}
+	if m := cfg.Matrix; m != nil {
+		token, err := secrets.Get(dir, secrets.MatrixToken)
+		if err != nil {
+			return nil, fmt.Errorf("matrix access token: %w (run agent-relay setup)", err)
+		}
+		c, err := matrix.New(m.Homeserver, m.UserID, token, m.AllowedUsers, m.AllowGroups, filepath.Join(dir, "matrix_since"))
 		if err != nil {
 			return nil, err
 		}

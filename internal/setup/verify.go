@@ -6,7 +6,10 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"strings"
+	"time"
 
+	"github.com/invokr-agent/agent-relay/internal/mxapi"
 	"github.com/invokr-agent/agent-relay/internal/signalrpc"
 	"github.com/invokr-agent/agent-relay/internal/tgapi"
 )
@@ -28,7 +31,11 @@ func telegramCall(ctx context.Context, token, method string, params, result any)
 
 func telegramMe(ctx context.Context, token string) (tgapi.User, error) {
 	var me tgapi.User
-	return me, telegramCall(ctx, token, "getMe", map[string]any{}, &me)
+	err := telegramCall(ctx, token, "getMe", map[string]any{}, &me)
+	if e, ok := errors.AsType[*tgapi.APIError](err); ok && e.Code == http.StatusUnauthorized {
+		err = &FieldError{"token", "was refused by Telegram"}
+	}
+	return me, err
 }
 
 // signalPing checks the socket is the user's own and that signal-cli answers
@@ -41,6 +48,23 @@ func signalPing(ctx context.Context, socket string) error {
 	defer func() { _ = closeConn() }()
 	if err := call("version", map[string]any{}, &json.RawMessage{}); err != nil {
 		return fmt.Errorf("setup: %w", err)
+	}
+	return nil
+}
+
+// matrixAPI is the client setup talks to homeservers with.
+var matrixAPI = &http.Client{Timeout: 30 * time.Second}
+
+// matrixVerify checks the access token belongs to userID.
+func matrixVerify(ctx context.Context, homeserver, userID, token string) error {
+	me, err := mxapi.API{HC: matrixAPI, Homeserver: strings.TrimRight(homeserver, "/"), AccessToken: token}.WhoAmI(ctx)
+	switch {
+	case mxapi.Unauthorized(err):
+		return &FieldError{"access_token", "was refused by the homeserver"}
+	case err != nil:
+		return fmt.Errorf("setup: %w", err)
+	case me != userID:
+		return &FieldError{"user_id", "does not match the access token"}
 	}
 	return nil
 }

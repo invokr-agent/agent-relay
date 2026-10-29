@@ -11,15 +11,16 @@ import (
 	"time"
 
 	"github.com/invokr-agent/agent-relay/internal/config"
+	"github.com/invokr-agent/agent-relay/internal/mxapi"
 	"github.com/invokr-agent/agent-relay/internal/secrets"
 	"github.com/invokr-agent/agent-relay/internal/signalrpc"
 	"github.com/invokr-agent/agent-relay/internal/tgapi"
 )
 
-// pairTTL bounds a pairing: the Telegram code and the Signal link expire.
+// pairTTL bounds a pairing: the code and the Signal link expire.
 const pairTTL = 5 * time.Minute
 
-// maxAttempts caps the code guesses one Telegram user gets per pairing.
+// maxAttempts caps the code guesses one user gets per pairing.
 const maxAttempts = 5
 
 // codeAlphabet has 32 symbols, without look-alikes (I, O, 0, 1).
@@ -33,6 +34,7 @@ const codeAlphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
 //	{"event":"waiting"}
 //	{"event":"paired","user_id":7,"name":"alice"}   Telegram
 //	{"event":"paired","number":"+15551234567"}      Signal
+//	{"event":"paired","name":"@alice:example.org"}  Matrix
 //	{"event":"error","message":"..."}
 type Event struct {
 	Event     string `json:"event"`
@@ -48,8 +50,8 @@ type Event struct {
 }
 
 // Pair runs client's pairing and saves the result to the config at path:
-// Telegram allow-lists the user who sends the one-time code to the bot in a
-// private chat; Signal links signal-cli as a device of the scanning phone.
+// Telegram and Matrix allow-list the user who sends the one-time code to the
+// bot in a private chat; Signal links signal-cli as a device of the scanning phone.
 func Pair(ctx context.Context, path, client string, emit func(Event)) error {
 	ctx, cancel := context.WithTimeout(ctx, pairTTL)
 	defer cancel()
@@ -60,6 +62,8 @@ func Pair(ctx context.Context, path, client string, emit func(Event)) error {
 	switch {
 	case client == "telegram" && cfg.Telegram != nil:
 		err = pairTelegram(ctx, cfg.Telegram, filepath.Dir(path), emit)
+	case client == "matrix" && cfg.Matrix != nil:
+		err = pairMatrix(ctx, cfg.Matrix, filepath.Dir(path), emit)
 	case client == "signal" && cfg.Signal != nil:
 		err = pairSignal(ctx, cfg.Signal, emit)
 	default:
@@ -147,11 +151,77 @@ func matchCode(u tgapi.Update, code string, issued int64, attempts map[int64]int
 	if rest, ok := strings.CutPrefix(text, "/start "); ok {
 		text = rest
 	}
-	text = strings.ToUpper(strings.TrimSpace(text))
-	if subtle.ConstantTimeCompare([]byte(text), []byte(code)) != 1 {
+	if !sameCode(text, code) {
 		return nil
 	}
 	return m.From
+}
+
+func sameCode(text, code string) bool {
+	return subtle.ConstantTimeCompare([]byte(strings.ToUpper(strings.TrimSpace(text))), []byte(code)) == 1
+}
+
+// pairMatrix joins every room the bot is invited to while it waits and
+// allow-lists the first user to send the code in a two-member room; it
+// leaves the other rooms it joined.
+func pairMatrix(ctx context.Context, m *config.Matrix, dir string, emit func(Event)) error {
+	token, err := secrets.Get(dir, secrets.MatrixToken)
+	if err != nil {
+		return err
+	}
+	if err := mxapi.CheckHomeserver(m.Homeserver); err != nil {
+		return err
+	}
+	api := mxapi.API{HC: matrixAPI, Homeserver: m.Homeserver, AccessToken: token}
+	s, err := api.Sync(ctx, "", 0)
+	if err != nil {
+		return fmt.Errorf("setup: %w", err)
+	}
+	code, issued := newCode(), time.Now().UnixMilli()
+	deadline, _ := ctx.Deadline()
+	emit(Event{Event: "code", Code: code, Bot: m.UserID, URI: "https://matrix.to/#/" + m.UserID,
+		ExpiresIn: int(time.Until(deadline).Seconds())})
+	emit(Event{Event: "waiting"})
+	joined, attempts := map[string]bool{}, map[string]int{}
+	defer func() {
+		for room := range joined {
+			_ = api.Leave(context.WithoutCancel(ctx), room)
+		}
+	}()
+	for ; err == nil; s, err = api.Sync(ctx, s.NextBatch, 25*time.Second) {
+		for room := range s.Rooms.Invite {
+			joined[room] = api.Join(ctx, room) == nil
+		}
+		if room, sender := matrixCode(ctx, api, s, m.UserID, code, issued, attempts); room != "" {
+			delete(joined, room)
+			m.AllowedUsers = appendNew(m.AllowedUsers, sender)
+			_, _ = api.Send(ctx, room, "m.room.message", mxapi.Notice("Paired with agent-relay."))
+			emit(Event{Event: "paired", Name: sender})
+			return nil
+		}
+	}
+	return fmt.Errorf("setup: %w", err)
+}
+
+// matrixCode finds a message, sent since issued (ms) in a two-member room,
+// equal to code, counting each sender's attempts; it leaves the room of a
+// failed attempt or one past maxAttempts.
+func matrixCode(ctx context.Context, api mxapi.API, s mxapi.Sync, self, code string, issued int64, attempts map[string]int) (room, sender string) {
+	for room, j := range s.Rooms.Join {
+		for _, e := range j.Timeline.Events {
+			if !e.Text() || e.Sender == self || e.TS < issued {
+				continue
+			}
+			if attempts[e.Sender]++; attempts[e.Sender] <= maxAttempts {
+				if direct, _ := api.Direct(ctx, room); direct && sameCode(e.Content.Body, code) {
+					return room, e.Sender
+				}
+			}
+			_ = api.Leave(ctx, room)
+			break
+		}
+	}
+	return "", ""
 }
 
 // pairSignal links signal-cli (daemon without --account) to the user's phone

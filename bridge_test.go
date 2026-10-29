@@ -172,7 +172,7 @@ func TestBridgeApprovals(t *testing.T) {
 		chat := newFakeClient(approve)
 		startBridge(t, filepath.Join(t.TempDir(), "sessions.json"), chat)
 		chat.say("run")
-		if req := <-chat.asked; req.Tool != "rm -rf build" || req.Summary != "execute" || req.Approver != "u1" {
+		if req := <-chat.asked; req.Tool != "rm -rf build" || req.Kind != "execute" || req.Approver != "u1" {
 			t.Fatalf("approval prompt = %+v", req)
 		}
 		if got := chat.next(t); got != want {
@@ -252,6 +252,10 @@ func TestBridgeCancelBypassesRateLimit(t *testing.T) {
 func TestBridgeCancelAndNew(t *testing.T) {
 	chat := newFakeClient(true)
 	startBridge(t, filepath.Join(t.TempDir(), "sessions.json"), chat)
+	chat.say("/cancel")
+	if got := chat.next(t); got != "Nothing to cancel." {
+		t.Fatalf("idle /cancel sent %q", got)
+	}
 	chat.say("hi") // opens the session /cancel needs
 	chat.next(t)
 	chat.say("wait")
