@@ -181,6 +181,23 @@ func TestNewRejectsPlainHTTPHomeserver(t *testing.T) {
 	}
 }
 
+func TestSyncPositionRefusesUnsafeFile(t *testing.T) {
+	since := filepath.Join(t.TempDir(), "since")
+	if err := os.WriteFile(since, []byte("stale"), 0o666); err != nil {
+		t.Fatal(err)
+	}
+	h, _, _ := startAt(t, false, since)
+	for deadline := time.Now().Add(5 * time.Second); !h.called("GET /sync"); {
+		if time.Now().After(deadline) {
+			t.Fatal("never synced")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if h.called("GET /sync?since=stale") {
+		t.Fatal("resumed from a world-writable sync position")
+	}
+}
+
 func TestSyncPositionSavedBeforeDispatch(t *testing.T) {
 	since := filepath.Join(t.TempDir(), "since")
 	h, _, in := startAt(t, false, since)

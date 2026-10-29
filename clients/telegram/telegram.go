@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -29,7 +30,7 @@ var (
 // Client is a Telegram Bot API long-poll client.
 type Client struct {
 	token, baseURL string
-	allowedIDs     map[int64]bool
+	allowedIDs     []int64
 	allowGroups    bool
 	httpClient     *http.Client
 	pending        sync.Map
@@ -45,12 +46,8 @@ func newWithBaseURL(token string, allowedUserIDs []int64, allowGroups bool, base
 	if strings.TrimSpace(token) == "" {
 		return nil, fmt.Errorf("telegram: token is required")
 	}
-	ids := make(map[int64]bool, len(allowedUserIDs))
-	for _, id := range allowedUserIDs {
-		ids[id] = true
-	}
 	return &Client{
-		token: token, allowedIDs: ids, allowGroups: allowGroups,
+		token: token, allowedIDs: allowedUserIDs, allowGroups: allowGroups,
 		httpClient: &http.Client{Timeout: 60 * time.Second}, baseURL: strings.TrimRight(baseURL, "/"),
 	}, nil
 }
@@ -118,7 +115,7 @@ func (c *Client) dispatchUpdate(ctx context.Context, u tgapi.Update, out chan<- 
 // admits reports whether an allow-listed user wrote in a chat type the
 // client serves. Fail closed: no sender or an empty list admits nobody.
 func (c *Client) admits(chat tgapi.Chat, from *tgapi.User) bool {
-	return from != nil && c.allowedIDs[from.ID] && (chat.Type == "private" || c.allowGroups)
+	return from != nil && slices.Contains(c.allowedIDs, from.ID) && (chat.Type == "private" || c.allowGroups)
 }
 
 func (c *Client) handleCallback(ctx context.Context, cq *tgapi.CallbackQuery) {
@@ -152,10 +149,7 @@ func (c *Client) handleCallback(ctx context.Context, cq *tgapi.CallbackQuery) {
 		}
 		return
 	}
-	select {
-	case value.(*kit.PendingApproval).Decision <- approved:
-	default:
-	}
+	value.(*kit.PendingApproval).Decide(approved)
 	label := "✅ Approved"
 	if !approved {
 		label = "❌ Denied"

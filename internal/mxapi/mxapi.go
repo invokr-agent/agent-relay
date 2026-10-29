@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"net/url"
 	"strconv"
+	"strings"
 	"sync/atomic"
 	"time"
 )
@@ -52,6 +53,11 @@ func CheckHomeserver(homeserver string) error {
 	}
 	return errors.New("matrix: homeserver must be https://, or http:// on localhost")
 }
+
+// Home is homeserver without a trailing slash: mxapi builds request paths under
+// /_matrix/client/v3, so a trailing slash would double the separator. Every
+// API for a homeserver goes through it, so no caller trims again.
+func Home(homeserver string) string { return strings.TrimRight(homeserver, "/") }
 
 // Do sends body as JSON to path under /_matrix/client/v3 and decodes the
 // reply into result, if non-nil.

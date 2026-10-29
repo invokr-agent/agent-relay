@@ -39,6 +39,29 @@ func TestCheckHomeserver(t *testing.T) {
 	}
 }
 
+func TestHomeTrimsTrailingSlash(t *testing.T) {
+	for hs, want := range map[string]string{"https://example.org": "https://example.org",
+		"https://example.org/": "https://example.org", "http://localhost:8008//": "http://localhost:8008"} {
+		if got := Home(hs); got != want {
+			t.Errorf("%s: Home %q", hs, got)
+		}
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.Contains(r.URL.Path, "//_matrix") {
+			t.Errorf("doubled slash in %q", r.URL.Path)
+		}
+		_, _ = w.Write([]byte(`{"user_id":"@bot:hs"}`))
+	}))
+	defer srv.Close()
+	api := API{HC: srv.Client(), Homeserver: Home(srv.URL + "/")}
+	if err := CheckHomeserver(api.Homeserver); err != nil {
+		t.Fatal(err)
+	}
+	if me, err := api.WhoAmI(context.Background()); err != nil || me != "@bot:hs" {
+		t.Fatalf("whoami: %v", err)
+	}
+}
+
 func TestRejected(t *testing.T) {
 	for status, want := range map[int]bool{400: true, 404: true, 401: false, 429: false, 500: false} {
 		if got := Rejected(&APIError{Status: status}); got != want {

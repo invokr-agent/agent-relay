@@ -107,8 +107,8 @@ func pairTelegram(ctx context.Context, t *config.Telegram, dir string, emit func
 		return err
 	}
 	var offset int64
-	for _, u := range updates {
-		offset = u.UpdateID + 1
+	if n := len(updates); n > 0 {
+		offset = updates[n-1].UpdateID + 1
 	}
 	code, issued := newCode(), time.Now().Unix()
 	deadline, _ := ctx.Deadline()
@@ -172,7 +172,7 @@ func pairMatrix(ctx context.Context, m *config.Matrix, dir string, emit func(Eve
 	if err := mxapi.CheckHomeserver(m.Homeserver); err != nil {
 		return err
 	}
-	api := mxapi.API{HC: matrixAPI, Homeserver: m.Homeserver, AccessToken: token}
+	api := mxapi.API{HC: matrixAPI, Homeserver: mxapi.Home(m.Homeserver), AccessToken: token}
 	s, err := api.Sync(ctx, "", 0)
 	if err != nil {
 		return fmt.Errorf("setup: %w", err)
@@ -204,21 +204,21 @@ func pairMatrix(ctx context.Context, m *config.Matrix, dir string, emit func(Eve
 }
 
 // matrixCode finds a message, sent since issued (ms) in a two-member room,
-// equal to code, counting each sender's attempts; it leaves the room of a
-// failed attempt or one past maxAttempts.
+// equal to code, counting each sender's attempts; it leaves a room only once
+// a sender used up maxAttempts, so a wrong code cannot leave the user's real
+// DM or the room the pairing is waiting in.
 func matrixCode(ctx context.Context, api mxapi.API, s mxapi.Sync, self, code string, issued int64, attempts map[string]int) (room, sender string) {
 	for room, j := range s.Rooms.Join {
 		for _, e := range j.Timeline.Events {
 			if !e.Text() || e.Sender == self || e.TS < issued {
 				continue
 			}
-			if attempts[e.Sender]++; attempts[e.Sender] <= maxAttempts {
-				if direct, _ := api.Direct(ctx, room); direct && sameCode(e.Content.Body, code) {
-					return room, e.Sender
-				}
+			if attempts[e.Sender]++; attempts[e.Sender] > maxAttempts {
+				_ = api.Leave(ctx, room)
+				break
+			} else if direct, _ := api.Direct(ctx, room); direct && sameCode(e.Content.Body, code) {
+				return room, e.Sender
 			}
-			_ = api.Leave(ctx, room)
-			break
 		}
 	}
 	return "", ""

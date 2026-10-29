@@ -101,12 +101,15 @@ func run(path string, logger *slog.Logger) error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	info := []any{"agent", cfg.Agent[0]}
-	if t := cfg.Telegram; t != nil {
-		bot, err := clients[0].(*telegram.Client).Username(ctx)
-		if err != nil {
-			bot = "? (" + err.Error() + ")"
+	for _, c := range clients {
+		if tc, ok := c.(*telegram.Client); ok {
+			bot, err := tc.Username(ctx)
+			if err != nil {
+				bot = "? (" + err.Error() + ")"
+			}
+			info = append(info, "telegram_bot", "@"+bot, "telegram_users", len(cfg.Telegram.AllowedUserIDs))
+			break
 		}
-		info = append(info, "telegram_bot", "@"+bot, "telegram_users", len(t.AllowedUserIDs))
 	}
 	if s := cfg.Signal; s != nil {
 		info = append(info, "signal_account", s.Account)

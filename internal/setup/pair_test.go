@@ -181,7 +181,7 @@ func TestPairSignalFailures(t *testing.T) {
 	}
 }
 
-func TestMatrixCodeLeavesRoomOfFailedAttempt(t *testing.T) {
+func TestMatrixCodeLeavesOnlyAfterAttemptsSpent(t *testing.T) {
 	var mu sync.Mutex
 	var left []string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -195,12 +195,21 @@ func TestMatrixCodeLeavesRoomOfFailedAttempt(t *testing.T) {
 	defer srv.Close()
 	var s mxapi.Sync
 	if err := json.Unmarshal([]byte(`{"rooms":{"join":{"!r":{"timeline":{"events":[
-		{"type":"m.room.message","sender":"@eve:hs","origin_server_ts":2,"content":{"msgtype":"m.text","body":"WRONG"}},
-		{"type":"m.room.message","sender":"@eve:hs","origin_server_ts":2,"content":{"msgtype":"m.text","body":"ABCD2345"}}]}}}}}`), &s); err != nil {
+		{"type":"m.room.message","sender":"@eve:hs","origin_server_ts":2,"content":{"msgtype":"m.text","body":"WRONG"}}]}}}}}`), &s); err != nil {
 		t.Fatal(err)
 	}
-	room, _ := matrixCode(context.Background(), mxapi.API{HC: srv.Client(), Homeserver: srv.URL}, s, "@bot:hs", "ABCD2345", 1, map[string]int{})
-	if room != "" || len(left) != 1 || left[0] != "/_matrix/client/v3/rooms/%21r/leave" {
-		t.Fatalf("room %q, left %v", room, left)
+	api := mxapi.API{HC: srv.Client(), Homeserver: mxapi.Home(srv.URL + "/")}
+	attempts := map[string]int{}
+	for range maxAttempts {
+		if _, who := matrixCode(context.Background(), api, s, "@bot:hs", "ABCD2345", 1, attempts); who != "" {
+			t.Fatalf("paired a wrong code: %q", who)
+		}
+	}
+	if len(left) != 0 {
+		t.Fatalf("left the room before the attempts were spent: %v", left)
+	}
+	matrixCode(context.Background(), api, s, "@bot:hs", "ABCD2345", 1, attempts)
+	if len(left) != 1 || left[0] != "/_matrix/client/v3/rooms/%21r/leave" {
+		t.Fatalf("one attempt past the limit: left %v", left)
 	}
 }

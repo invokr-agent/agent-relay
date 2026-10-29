@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
-	"strings"
 	"time"
 
 	"github.com/invokr-agent/agent-relay/internal/mxapi"
@@ -57,7 +56,7 @@ var matrixAPI = &http.Client{Timeout: 30 * time.Second}
 
 // matrixVerify checks the access token belongs to userID.
 func matrixVerify(ctx context.Context, homeserver, userID, token string) error {
-	me, err := mxapi.API{HC: matrixAPI, Homeserver: strings.TrimRight(homeserver, "/"), AccessToken: token}.WhoAmI(ctx)
+	me, err := mxapi.API{HC: matrixAPI, Homeserver: mxapi.Home(homeserver), AccessToken: token}.WhoAmI(ctx)
 	switch {
 	case mxapi.Unauthorized(err):
 		return &FieldError{"access_token", "was refused by the homeserver"}

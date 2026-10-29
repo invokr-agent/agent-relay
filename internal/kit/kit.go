@@ -55,6 +55,33 @@ type PendingApproval struct {
 	Decision chan bool
 }
 
+// Decide hands the answer to the waiting request. The reply channel holds one
+// answer, so a later or concurrent one is dropped: the first answer wins.
+func (p *PendingApproval) Decide(ok bool) {
+	select {
+	case p.Decision <- ok:
+	default:
+	}
+}
+
+// PendingFor is the one pending approval in chat whose owner matches sender
+// (an empty sender matches any), or nil when none or several match: a bare
+// reply is never guessed when a chat has more than one request pending.
+func PendingFor(pending *sync.Map, chat, sender string) *PendingApproval {
+	var match *PendingApproval
+	n := 0
+	pending.Range(func(_, value any) bool {
+		if p := value.(*PendingApproval); p.ChatID == chat && (sender == "" || p.Sender == sender) {
+			match, n = p, n+1
+		}
+		return n < 2
+	})
+	if n == 2 {
+		return nil
+	}
+	return match
+}
+
 // AwaitApproval registers before sending and removes only its own request on exit.
 // Clients retain their reply parsing and chat-ownership checks.
 func AwaitApproval(ctx context.Context, pending *sync.Map, client, chatID, sender string, req relay.ApprovalRequest, send func(relay.ApprovalRequest) error) (bool, error) {
