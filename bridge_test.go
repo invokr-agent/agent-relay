@@ -1,7 +1,9 @@
 package relay
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -9,6 +11,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -66,7 +69,7 @@ func (a *fakeAgent) Prompt(ctx context.Context, req acp.PromptRequest) (acp.Prom
 		return acp.PromptResponse{}, ctx.Err()
 	case "run":
 		perm, err := a.conn.RequestPermission(ctx, acp.RequestPermissionRequest{SessionID: req.SessionID,
-			ToolCall: acp.ToolCallUpdate{ToolCallID: "t1", Title: "rm -rf build", Kind: acp.ToolKindExecute},
+			ToolCall: acp.ToolCallUpdate{ToolCallID: "t1", Title: "rm -rf build", Kind: acp.ToolKindExecute, RawInput: json.RawMessage(`{"cmd":"rm -rf build"}`)},
 			Options: []acp.PermissionOption{{OptionID: "yes", Name: "Allow", Kind: acp.PermissionOptionKindAllowOnce},
 				{OptionID: "no", Name: "Deny", Kind: acp.PermissionOptionKindRejectOnce}}})
 		if err != nil {
@@ -97,6 +100,7 @@ type fakeClient struct {
 	sent    chan string
 	asked   chan ApprovalRequest
 	approve bool
+	timeout bool // AskApproval ends as if the approval deadline passed
 }
 
 func newFakeClient(approve bool) *fakeClient {
@@ -113,13 +117,16 @@ func (f *fakeClient) Send(_ context.Context, _ string, text string) error {
 
 func (f *fakeClient) AskApproval(ctx context.Context, _ string, req ApprovalRequest) (bool, error) {
 	f.asked <- req
+	if f.timeout {
+		return false, context.DeadlineExceeded
+	}
 	if !f.approve {
 		return false, nil
 	}
 	return true, nil
 }
 
-func (f *fakeClient) say(text string) { f.in <- Inbound{ChatID: "me", Text: text} }
+func (f *fakeClient) say(text string) { f.in <- Inbound{ChatID: "me", SenderID: "u1", Text: text} }
 
 func (f *fakeClient) next(t *testing.T) string {
 	t.Helper()
@@ -133,7 +140,7 @@ func (f *fakeClient) next(t *testing.T) string {
 }
 
 // startBridge runs a bridge on store against a fresh fake agent process.
-func startBridge(t *testing.T, store string, client *fakeClient) {
+func startBridge(t *testing.T, store string, client *fakeClient, opts ...func(*Bridge)) {
 	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
 	s, err := NewStore(store)
@@ -141,6 +148,9 @@ func startBridge(t *testing.T, store string, client *fakeClient) {
 		t.Fatal(err)
 	}
 	b := &Bridge{Store: s, Clients: []Client{client}, Logger: slog.New(slog.DiscardHandler), Cwd: t.TempDir()}
+	for _, opt := range opts {
+		opt(b)
+	}
 	cmd := exec.Command(os.Args[0], "-test.run=^$")
 	cmd.Env = append(os.Environ(), fakeAgentEnv+"=1")
 	done := make(chan struct{})
@@ -162,7 +172,7 @@ func TestBridgeApprovals(t *testing.T) {
 		chat := newFakeClient(approve)
 		startBridge(t, filepath.Join(t.TempDir(), "sessions.json"), chat)
 		chat.say("run")
-		if req := <-chat.asked; req.Tool != "rm -rf build" || req.Summary != "execute" {
+		if req := <-chat.asked; req.Tool != "rm -rf build" || req.Kind != "execute" || req.Approver != "u1" {
 			t.Fatalf("approval prompt = %+v", req)
 		}
 		if got := chat.next(t); got != want {
@@ -171,13 +181,85 @@ func TestBridgeApprovals(t *testing.T) {
 	}
 }
 
+// An unanswered approval denies the tool and is audited as a timeout.
+func TestBridgeApprovalTimeoutDenies(t *testing.T) {
+	chat := newFakeClient(true)
+	chat.timeout = true
+	var audit syncBuffer
+	startBridge(t, filepath.Join(t.TempDir(), "sessions.json"), chat, func(b *Bridge) { b.Audit = slog.New(slog.NewJSONHandler(&audit, nil)) })
+	chat.say("run")
+	<-chat.asked
+	if got := chat.next(t); got != "approval timed out; denied" {
+		t.Fatalf("notice = %q", got)
+	}
+	if got := chat.next(t); got != "echo: skipped (s1)" {
+		t.Fatalf("reply = %q", got)
+	}
+	var entry map[string]string
+	if err := json.Unmarshal([]byte(audit.String()), &entry); err != nil {
+		t.Fatal(err)
+	}
+	if entry["approver"] != "u1" || entry["tool"] != "rm -rf build" || entry["decision"] != "timeout" || entry["chat"] != "fake:me" || entry["details"] == "" {
+		t.Fatalf("audit = %v", entry)
+	}
+}
+
+type syncBuffer struct {
+	mu sync.Mutex
+	b  bytes.Buffer
+}
+
+func (s *syncBuffer) Write(p []byte) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.b.Write(p)
+}
+
+func (s *syncBuffer) String() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.b.String()
+}
+
+func TestBridgeRateLimit(t *testing.T) {
+	b := &Bridge{RateLimit: 2}
+	c := &chat{}
+	for i, want := range []bool{true, true, false} {
+		if b.admit(c) != want {
+			t.Fatalf("message %d admitted = %v", i+1, !want)
+		}
+	}
+	c.window = c.window.Add(-rateWindow)
+	if !b.admit(c) {
+		t.Fatal("new window not admitted")
+	}
+}
+
+// /cancel still reaches the agent when the chat is over its rate limit.
+func TestBridgeCancelBypassesRateLimit(t *testing.T) {
+	chat := newFakeClient(true)
+	startBridge(t, filepath.Join(t.TempDir(), "sessions.json"), chat, func(b *Bridge) { b.RateLimit = 2 })
+	chat.say("hi")
+	chat.next(t)
+	chat.say("wait")
+	time.Sleep(100 * time.Millisecond)
+	chat.say("/cancel")
+	if got := chat.next(t); got != "⏹ stopped" {
+		t.Fatalf("cancel under rate limit sent %q", got)
+	}
+}
+
 func TestBridgeCancelAndNew(t *testing.T) {
 	chat := newFakeClient(true)
 	startBridge(t, filepath.Join(t.TempDir(), "sessions.json"), chat)
+	chat.say("/cancel")
+	if got := chat.next(t); got != "Nothing to cancel." {
+		t.Fatalf("idle /cancel sent %q", got)
+	}
 	chat.say("hi") // opens the session /cancel needs
 	chat.next(t)
 	chat.say("wait")
-	time.Sleep(100 * time.Millisecond) // let the turn reach the agent
+	time.Sleep(100 * time.Millisecond)
 	chat.say("/cancel")
 	if got := chat.next(t); got != "⏹ stopped" {
 		t.Fatalf("cancelled turn sent %q", got)
@@ -239,5 +321,36 @@ func TestBridgeListenerStopped(t *testing.T) {
 	err = b.Run(context.Background(), cmd)
 	if err == nil || !strings.Contains(err.Error(), "fake listener stopped") {
 		t.Fatalf("Run = %v", err)
+	}
+}
+
+// staleClient approves, but only after the bridge has moved to the next turn.
+type staleClient struct {
+	*fakeClient
+	c *chat
+}
+
+func (s staleClient) AskApproval(ctx context.Context, chatID string, req ApprovalRequest) (bool, error) {
+	s.c.set(func() { s.c.approver = "u2"; s.c.turn += 2 })
+	return s.fakeClient.AskApproval(ctx, chatID, req)
+}
+
+// A permission request is never bound to a sender outside its own turn.
+func TestBridgePermissionOutsideTurnDenied(t *testing.T) {
+	req := acp.RequestPermissionRequest{SessionID: "s1", Options: []acp.PermissionOption{
+		{OptionID: "yes", Kind: acp.PermissionOptionKindAllowOnce}, {OptionID: "no", Kind: acp.PermissionOptionKindRejectOnce}}}
+	for name, approver := range map[string]string{"no turn": "", "previous turn": "u1"} {
+		client := newFakeClient(true)
+		c := &chat{key: "fake:me", id: "me", approver: approver}
+		c.t = staleClient{client, c}
+		b := &Bridge{Logger: slog.New(slog.DiscardHandler)}
+		b.sessions.Store(acp.SessionID("s1"), c)
+		resp, err := b.RequestPermission(context.Background(), req)
+		if err != nil || resp.Outcome.Selected == nil || resp.Outcome.Selected.OptionID != "no" {
+			t.Fatalf("%s: outcome %+v, err %v", name, resp.Outcome, err)
+		}
+		if asked := len(client.asked); (approver == "") != (asked == 0) {
+			t.Fatalf("%s: asked %d times", name, asked)
+		}
 	}
 }

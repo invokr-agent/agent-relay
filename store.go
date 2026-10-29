@@ -5,8 +5,9 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"path/filepath"
 	"sync"
+
+	"github.com/invokr-agent/agent-relay/internal/config"
 )
 
 // Store maps chat keys to agent session IDs, persisted as a JSON file.
@@ -26,7 +27,7 @@ type Store struct {
 // silently replaced.
 func NewStore(path string) (*Store, error) {
 	s := &Store{path: path, sessions: map[string]string{}}
-	data, err := os.ReadFile(path)
+	data, err := config.ReadFile(path, 0o022)
 	if errors.Is(err, os.ErrNotExist) {
 		return s, nil
 	}
@@ -76,20 +77,8 @@ func (s *Store) save() error {
 	if err != nil {
 		return err
 	}
-	if err := os.MkdirAll(filepath.Dir(s.path), 0o700); err != nil {
-		return fmt.Errorf("messaging store: %w", err)
-	}
-	tmp, err := os.CreateTemp(filepath.Dir(s.path), ".sessions-*")
-	if err != nil {
-		return fmt.Errorf("messaging store: %w", err)
-	}
-	defer func() { _ = os.Remove(tmp.Name()) }()
-	if _, err := tmp.Write(append(data, '\n')); err != nil {
-		_ = tmp.Close()
+	if err := config.WriteFile(s.path, append(data, '\n')); err != nil {
 		return fmt.Errorf("messaging store: write %s: %w", s.path, err)
 	}
-	if err := tmp.Close(); err != nil {
-		return fmt.Errorf("messaging store: write %s: %w", s.path, err)
-	}
-	return os.Rename(tmp.Name(), s.path)
+	return nil
 }

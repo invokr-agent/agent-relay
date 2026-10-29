@@ -12,7 +12,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/invokr-agent/agent-relay"
+	relay "github.com/invokr-agent/agent-relay"
 	"github.com/invokr-agent/agent-relay/internal/kit"
 )
 
@@ -34,8 +34,8 @@ func TestApprovalIdentityAndCleanup(t *testing.T) {
 				}
 				switch scenario {
 				case "wrong peer":
-					client.dispatchUpdate(context.Background(), tgUpdate{CallbackQuery: &tgCallbackQuery{
-						ID: "wrong", From: &tgUser{ID: 7}, Data: "approve:request", Message: tgMessage{MessageID: 42, Chat: tgChat{ID: 222}},
+					client.dispatchUpdate(context.Background(), Update{CallbackQuery: &CallbackQuery{
+						ID: "wrong", From: &User{ID: 7}, Data: "approve:request", Message: Message{MessageID: 42, Chat: Chat{ID: 222}},
 					}}, nil)
 					if got, _ := client.pending.Load("request"); got != original {
 						t.Error("wrong allowed peer consumed request")
@@ -60,20 +60,19 @@ func TestApprovalIdentityAndCleanup(t *testing.T) {
 					cancel()
 				}
 				if scenario == "wrong peer" || scenario == "duplicate" {
-					client.dispatchUpdate(context.Background(), tgUpdate{CallbackQuery: &tgCallbackQuery{
-						ID: "right", From: &tgUser{ID: 7}, Data: "approve:request", Message: tgMessage{MessageID: 42, Chat: tgChat{ID: 111}},
+					client.dispatchUpdate(context.Background(), Update{CallbackQuery: &CallbackQuery{
+						ID: "right", From: &User{ID: 7}, Data: "approve:request", Message: Message{MessageID: 42, Chat: Chat{ID: 111}},
 					}}, nil)
 				}
 				_, _ = fmt.Fprint(w, `{"ok":true,"result":{"message_id":42}}`)
 			}))
 			defer server.Close()
 			var err error
-			client, err = newWithBaseURL("identity", []int64{111, 222}, false, server.URL)
+			client, err = newWithBaseURL("identity", []int64{7}, true, server.URL)
 			if err != nil {
 				t.Fatal(err)
 			}
-			client.senders.Store("111", "7")
-			approved, err := client.AskApproval(ctx, "111", relay.ApprovalRequest{ID: " request "})
+			approved, err := client.AskApproval(ctx, "111", relay.ApprovalRequest{ID: " request ", Approver: "7"})
 			switch scenario {
 			case "wrong peer", "duplicate":
 				if !approved || err != nil {
@@ -127,15 +126,15 @@ func TestUnacceptedCallbacksNeverClaimDecision(t *testing.T) {
 				_, _ = fmt.Fprint(w, `{"ok":true,"result":true}`)
 			}))
 			defer server.Close()
-			client, err := newWithBaseURL("neutral", []int64{111, 222}, false, server.URL)
+			client, err := newWithBaseURL("neutral", []int64{7}, true, server.URL)
 			if err != nil {
 				t.Fatal(err)
 			}
 			if scenario == "wrong peer" {
 				client.pending.Store("request", &kit.PendingApproval{ChatID: "111", Sender: "7", Decision: make(chan bool, 1)})
 			}
-			client.dispatchUpdate(context.Background(), tgUpdate{CallbackQuery: &tgCallbackQuery{
-				ID: "callback", Data: "approve:request", Message: tgMessage{MessageID: 42, Chat: tgChat{ID: 222}},
+			client.dispatchUpdate(context.Background(), Update{CallbackQuery: &CallbackQuery{
+				ID: "callback", From: &User{ID: 7}, Data: "approve:request", Message: Message{MessageID: 42, Chat: Chat{ID: 222}},
 			}}, nil)
 			if acknowledgements.Load() != 1 {
 				t.Fatal("callback spinner not acknowledged")

@@ -4,8 +4,10 @@ import "context"
 
 type Inbound struct {
 	ChatID string // opaque per-client chat identifier
-	Sender string // display name or number; used only for logging
-	Text   string
+	// SenderID is the stable ID of the user who sent the message; that user
+	// alone may answer the approvals of the turn it starts.
+	SenderID string
+	Text     string
 }
 
 // Client is implemented by each messaging backend.
@@ -35,5 +37,8 @@ type Typer interface {
 
 // ApprovalRequest carries the fields needed for a user-facing approval prompt.
 type ApprovalRequest struct {
-	ID, Tool, Summary, Details string
+	ID, Tool, Kind, Details string
+	// Approver is the SenderID of the user who started the turn; clients
+	// accept an answer from that user only.
+	Approver string
 }

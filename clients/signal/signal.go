@@ -13,16 +13,15 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/invokr-agent/agent-relay"
+	relay "github.com/invokr-agent/agent-relay"
 	"github.com/invokr-agent/agent-relay/internal/kit"
+	"github.com/invokr-agent/agent-relay/internal/signalrpc"
 )
 
 const (
 	chunkLimit    = 2000
-	dialTimeout   = 5 * time.Second
 	maxBackoff    = 60 * time.Second
 	reconnectWait = 2 * time.Second
-	maxLine       = 1 << 20
 )
 
 // rpcTimeout bounds one call: a connection dropped after the write would
@@ -37,37 +36,42 @@ var (
 // Client is a signal-cli JSON-RPC over UNIX socket client.
 type Client struct {
 	socketPath     string
+	account        string // set for a multi-account daemon; also Note to Self
 	allowedNumbers map[string]bool
-	allowAll       bool
 	conn           net.Conn
 	reader         *bufio.Scanner
 	preAckLines    [][]byte
 	mu             sync.Mutex
 	nextID         atomic.Int64
 	pending        sync.Map // map[request ID]*kit.PendingApproval
-	pendingRPC     sync.Map // map[int64]chan rpcResult
+	pendingRPC     sync.Map // map[int64]chan signalrpc.Message
 	dialer         func(network, address string) (net.Conn, error)
 }
 
-// New dials the UNIX socket and sends subscribeReceive.
-// Returns an error if the socket is unreachable or the ack is not received
-// within 5 seconds.
-func New(socketPath string, allowedNumbers []string, allowAll bool) (*Client, error) {
-	return newWithDialer(socketPath, allowedNumbers, allowAll, (&net.Dialer{Timeout: dialTimeout}).Dial)
+// New dials the UNIX socket and sends subscribeReceive. Only allowedNumbers
+// are served; an empty list admits nobody. Returns an error if the socket's
+// peer is not this user, is unreachable, or the ack is not received within
+// 5 seconds.
+//
+// account names the relay's own number. It is required when signal-cli runs
+// without --account (as after pairing), and enables Note to Self: messages
+// the account's owner sends to themselves from the phone reach the relay.
+func New(socketPath, account string, allowedNumbers []string) (*Client, error) {
+	return newWithDialer(socketPath, account, allowedNumbers, signalrpc.Dial)
 }
 
-func newWithDialer(socketPath string, allowedNumbers []string, allowAll bool, dialer func(string, string) (net.Conn, error)) (*Client, error) {
+func newWithDialer(socketPath, account string, allowedNumbers []string, dialer func(string, string) (net.Conn, error)) (*Client, error) {
 	allowed := make(map[string]bool, len(allowedNumbers))
 	for _, n := range allowedNumbers {
 		allowed[n] = true
 	}
-	c := &Client{socketPath: socketPath, allowedNumbers: allowed, allowAll: allowAll, dialer: dialer}
+	c := &Client{socketPath: socketPath, account: account, allowedNumbers: allowed, dialer: dialer}
 	conn, err := dialer("unix", socketPath)
 	if err != nil {
 		return nil, fmt.Errorf("signal: dial %s: %w", socketPath, err)
 	}
 	c.conn = conn
-	if err := c.subscribe(context.Background()); err != nil {
+	if err := c.subscribe(); err != nil {
 		_ = conn.Close()
 		return nil, err
 	}
@@ -86,37 +90,24 @@ func (c *Client) Listen(ctx context.Context) (<-chan relay.Inbound, error) {
 func (c *Client) readLoop(ctx context.Context, out chan<- relay.Inbound) {
 	defer close(out)
 	backoff := reconnectWait
-	for {
-		if ctx.Err() != nil {
-			return
-		}
-		conn, reader, buffered := c.currentReadState()
-		if conn == nil || reader == nil {
-			if !c.waitReconnect(ctx, &backoff) {
+	for ctx.Err() == nil {
+		c.mu.Lock()
+		conn, reader, buffered := c.conn, c.reader, c.preAckLines
+		c.preAckLines = nil
+		c.mu.Unlock()
+		if conn != nil && reader != nil {
+			_ = c.readConn(ctx, reader, buffered, out)
+			if ctx.Err() != nil {
 				return
 			}
-			continue
+			c.dropConn(conn)
 		}
-		_ = c.readConn(ctx, reader, buffered, out)
-		if ctx.Err() != nil {
-			return
-		}
-		c.dropConn(conn)
 		if !c.waitReconnect(ctx, &backoff) {
 			return
 		}
 	}
 }
 
-func (c *Client) currentReadState() (net.Conn, *bufio.Scanner, [][]byte) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	buffered := c.preAckLines
-	c.preAckLines = nil
-	return c.conn, c.reader, buffered
-}
-
-// dropConn closes conn and clears it if it's still the active connection.
 func (c *Client) dropConn(conn net.Conn) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -128,13 +119,11 @@ func (c *Client) dropConn(conn net.Conn) {
 	}
 }
 
-// waitReconnect backs off then attempts a reconnect, resetting backoff on success.
-// It returns false if ctx was cancelled during the wait.
 func (c *Client) waitReconnect(ctx context.Context, backoff *time.Duration) bool {
 	if !kit.WaitBackoff(ctx, backoff, maxBackoff) {
 		return false
 	}
-	if err := c.reconnect(ctx); err == nil {
+	if err := c.reconnect(); err == nil {
 		*backoff = reconnectWait
 	}
 	return true
@@ -148,8 +137,7 @@ func (c *Client) readConn(ctx context.Context, scanner *bufio.Scanner, buffered 
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
-		line := scanner.Bytes()
-		c.dispatchLine(ctx, line, out)
+		c.dispatchLine(ctx, scanner.Bytes(), out)
 	}
 	if err := scanner.Err(); err != nil {
 		return fmt.Errorf("signal: read: %w", err)
@@ -158,42 +146,62 @@ func (c *Client) readConn(ctx context.Context, scanner *bufio.Scanner, buffered 
 	return io.EOF
 }
 
-type rpcNotification struct {
-	JSONRPC string          `json:"jsonrpc"`
-	Method  string          `json:"method"`
-	Params  json.RawMessage `json:"params"`
-	ID      *int64          `json:"id"`
-}
-
-type rpcError struct {
-	Code    int    `json:"code"`
-	Message string `json:"message"`
-}
-
-type rpcResult struct {
-	result json.RawMessage
-	err    error
+type signalMessage struct {
+	Message           string          `json:"message"`
+	GroupInfo         json.RawMessage `json:"groupInfo"`
+	DestinationNumber string          `json:"destinationNumber"`
 }
 
 type signalParams struct {
 	Envelope struct {
-		Source       string `json:"source"`
-		SourceNumber string `json:"sourceNumber"`
-		DataMessage  *struct {
-			Message   string          `json:"message"`
-			GroupInfo json.RawMessage `json:"groupInfo"`
-		} `json:"dataMessage"`
+		Source       string         `json:"source"`
+		SourceNumber string         `json:"sourceNumber"`
+		DataMessage  *signalMessage `json:"dataMessage"`
+		SyncMessage  *struct {
+			SentMessage *signalMessage `json:"sentMessage"`
+		} `json:"syncMessage"`
 	} `json:"envelope"`
 }
 
+// message returns the envelope's sender and text: a direct message, or a
+// Note to Self the account's owner sent from another device. Messages the
+// owner sends to anyone else, and group messages (a reply would go to the
+// sender as a DM), are skipped.
+func (c *Client) message(p signalParams) (source, text string, ok bool) {
+	env := p.Envelope
+	m := env.DataMessage
+	// Newer signal-cli puts a UUID in source and the number in sourceNumber.
+	source = cmp.Or(env.SourceNumber, env.Source)
+	if sync := env.SyncMessage; m == nil && sync != nil && sync.SentMessage != nil &&
+		c.account != "" && source == c.account && sync.SentMessage.DestinationNumber == c.account {
+		m = sync.SentMessage
+	}
+	if m == nil || m.Message == "" || m.GroupInfo != nil {
+		return "", "", false
+	}
+	return source, strings.TrimSpace(m.Message), true
+}
+
+func (c *Client) withAccount(params map[string]any) map[string]any {
+	if c.account != "" {
+		params["account"] = c.account
+	}
+	return params
+}
+
 func (c *Client) dispatchLine(ctx context.Context, line []byte, out chan<- relay.Inbound) {
-	var notif rpcNotification
+	var notif signalrpc.Message
 	if err := json.Unmarshal(line, &notif); err != nil {
 		return
 	}
 	// Responses have an id; dispatch to waiting rpc() caller.
 	if notif.ID != nil {
-		c.dispatchRPCResponse(*notif.ID, line)
+		if v, ok := c.pendingRPC.Load(*notif.ID); ok {
+			select {
+			case v.(chan signalrpc.Message) <- notif:
+			default:
+			}
+		}
 		return
 	}
 	if notif.Method != "receive" {
@@ -203,22 +211,15 @@ func (c *Client) dispatchLine(ctx context.Context, line []byte, out chan<- relay
 	if err := json.Unmarshal(notif.Params, &params); err != nil {
 		return
 	}
-	env := params.Envelope
-	// Group messages are skipped: a reply would go to the sender as a DM.
-	if env.DataMessage == nil || env.DataMessage.Message == "" || env.DataMessage.GroupInfo != nil {
+	source, text, ok := c.message(params)
+	if !ok || c.handleApprovalReply(source, text) {
 		return
 	}
-	// Newer signal-cli puts a UUID in source and the number in sourceNumber.
-	source := cmp.Or(env.SourceNumber, env.Source)
-	text := strings.TrimSpace(env.DataMessage.Message)
-	if c.handleApprovalReply(source, text) {
-		return
-	}
-	if !kit.Allowed(c.allowAll, c.allowedNumbers, source) {
+	if !c.allowedNumbers[source] {
 		return
 	}
 	select {
-	case out <- relay.Inbound{ChatID: source, Sender: source, Text: text}:
+	case out <- relay.Inbound{ChatID: source, SenderID: source, Text: text}:
 	case <-ctx.Done():
 	}
 }
@@ -241,18 +242,11 @@ func (c *Client) handleApprovalReply(source, text string) bool {
 	return true
 }
 
-func parseApprovalReply(text string) (bool, string, bool) {
-	fields := strings.Fields(text)
-	if len(fields) < 1 || len(fields) > 2 {
+func parseApprovalReply(text string) (approved bool, requestID string, ok bool) {
+	verb, requestID, _ := strings.Cut(strings.Join(strings.Fields(text), " "), " ")
+	verb = strings.ToUpper(verb)
+	if strings.Contains(requestID, " ") || verb != "YES" && verb != "NO" {
 		return false, "", false
-	}
-	verb := strings.ToUpper(fields[0])
-	if verb != "YES" && verb != "NO" {
-		return false, "", false
-	}
-	requestID := ""
-	if len(fields) == 2 {
-		requestID = fields[1]
 	}
 	return verb == "YES", requestID, true
 }
@@ -266,18 +260,16 @@ func (c *Client) pendingForReply(source, requestID string) *kit.PendingApproval 
 		return value.(*kit.PendingApproval)
 	}
 	var match *kit.PendingApproval
+	n := 0
 	c.pending.Range(func(_, value any) bool {
-		pending := value.(*kit.PendingApproval)
-		if pending.ChatID != source {
-			return true
+		if p := value.(*kit.PendingApproval); p.ChatID == source {
+			match, n = p, n+1
 		}
-		if match != nil {
-			match = nil
-			return false
-		}
-		match = pending
-		return true
+		return n < 2
 	})
+	if n > 1 {
+		return nil
+	}
 	return match
 }
 
@@ -313,46 +305,16 @@ func buildApprovalPrompt(req relay.ApprovalRequest) string {
 		"\n\nReply YES <id> to approve or NO <id> to deny (bare YES/NO works when one request is pending).\nReply ID: " + req.ID
 }
 
-func (c *Client) dispatchRPCResponse(id int64, line []byte) {
-	v, ok := c.pendingRPC.Load(id)
-	if !ok {
-		return
-	}
-	ch := v.(chan rpcResult)
-	var resp struct {
-		Error  *rpcError       `json:"error"`
-		Result json.RawMessage `json:"result"`
-	}
-	var res rpcResult
-	if err := json.Unmarshal(line, &resp); err == nil && resp.Error != nil {
-		res.err = fmt.Errorf("signal: rpc error %d: %s", resp.Error.Code, resp.Error.Message)
-	} else if err == nil {
-		res.result = resp.Result
-	}
-	select {
-	case ch <- res:
-	default:
-	}
-}
-
-func rpcFrame(id int64, method string, params any) ([]byte, error) {
-	raw, err := json.Marshal(map[string]any{"jsonrpc": "2.0", "id": id, "method": method, "params": params})
-	if err != nil {
-		return nil, fmt.Errorf("signal: marshal rpc: %w", err)
-	}
-	return append(raw, '\n'), nil
-}
-
-func (c *Client) rpc(ctx context.Context, method string, params any) (json.RawMessage, error) {
-	id := c.nextID.Add(1)
-	raw, err := rpcFrame(id, method, params)
-	if err != nil {
-		return nil, err
-	}
-
+func (c *Client) rpc(ctx context.Context, method string, params map[string]any) (json.RawMessage, error) {
 	ctx, cancel := context.WithTimeout(ctx, rpcTimeout)
 	defer cancel()
-	ch := make(chan rpcResult, 1)
+	return c.call(ctx, method, params)
+}
+
+func (c *Client) call(ctx context.Context, method string, params map[string]any) (json.RawMessage, error) {
+	id := c.nextID.Add(1)
+	raw := signalrpc.Frame(id, method, c.withAccount(params))
+	ch := make(chan signalrpc.Message, 1)
 	c.pendingRPC.Store(id, ch)
 	defer c.pendingRPC.Delete(id)
 
@@ -367,21 +329,24 @@ func (c *Client) rpc(ctx context.Context, method string, params any) (json.RawMe
 	}
 	select {
 	case res := <-ch:
-		return res.result, res.err
+		if res.Error != nil {
+			return nil, fmt.Errorf("signal: %w", res.Error)
+		}
+		return res.Result, nil
 	case <-ctx.Done():
 		return nil, fmt.Errorf("signal: rpc %s: %w", method, ctx.Err())
 	}
 }
 
-func (c *Client) subscribe(_ context.Context) error {
+func (c *Client) subscribe() error {
 	id := c.nextID.Add(1)
-	raw, _ := rpcFrame(id, "subscribeReceive", map[string]any{})
+	raw := signalrpc.Frame(id, "subscribeReceive", c.withAccount(map[string]any{}))
 
 	c.mu.Lock()
 	conn := c.conn
 	c.mu.Unlock()
 
-	if err := conn.SetDeadline(time.Now().Add(dialTimeout)); err != nil {
+	if err := conn.SetDeadline(time.Now().Add(signalrpc.DialTimeout)); err != nil {
 		return fmt.Errorf("signal: set deadline: %w", err)
 	}
 	defer func() { _ = conn.SetDeadline(time.Time{}) }()
@@ -390,7 +355,7 @@ func (c *Client) subscribe(_ context.Context) error {
 		return fmt.Errorf("signal: subscribe write: %w", err)
 	}
 	scanner := bufio.NewScanner(conn)
-	scanner.Buffer(nil, maxLine)
+	scanner.Buffer(nil, signalrpc.MaxLine)
 	buffered, err := c.readSubscribeAck(scanner, id)
 	if err != nil {
 		return err
@@ -407,26 +372,20 @@ func (c *Client) readSubscribeAck(scanner *bufio.Scanner, id int64) ([][]byte, e
 	var buffered [][]byte
 	for scanner.Scan() {
 		line := append([]byte(nil), scanner.Bytes()...)
-		var env struct {
-			ID    *int64    `json:"id"`
-			Error *rpcError `json:"error"`
-		}
+		var env signalrpc.Message
 		if err := json.Unmarshal(line, &env); err != nil || env.ID == nil || *env.ID != id {
 			buffered = append(buffered, line)
 			continue
 		}
 		if env.Error != nil {
-			return nil, fmt.Errorf("signal: subscribe: rpc error %d: %s", env.Error.Code, env.Error.Message)
+			return nil, fmt.Errorf("signal: subscribe: %w", env.Error)
 		}
 		return buffered, nil
 	}
-	if err := scanner.Err(); err != nil {
-		return nil, fmt.Errorf("signal: subscribe ack read: %w", err)
-	}
-	return nil, fmt.Errorf("signal: subscribe ack: connection closed")
+	return nil, fmt.Errorf("signal: subscribe ack: connection closed: %w", cmp.Or(scanner.Err(), io.EOF))
 }
 
-func (c *Client) reconnect(ctx context.Context) error {
+func (c *Client) reconnect() error {
 	conn, err := c.dialer("unix", c.socketPath)
 	if err != nil {
 		return fmt.Errorf("signal: reconnect: %w", err)
@@ -434,7 +393,7 @@ func (c *Client) reconnect(ctx context.Context) error {
 	c.mu.Lock()
 	c.conn = conn
 	c.mu.Unlock()
-	if err := c.subscribe(ctx); err != nil {
+	if err := c.subscribe(); err != nil {
 		c.dropConn(conn)
 		return fmt.Errorf("signal: reconnect subscribe: %w", err)
 	}

@@ -3,6 +3,8 @@ package kit
 import (
 	"strings"
 	"testing"
+
+	relay "github.com/invokr-agent/agent-relay"
 )
 
 func TestChunkMessage(t *testing.T) {
@@ -15,15 +17,12 @@ func TestChunkMessage(t *testing.T) {
 	}
 }
 
-func TestAllowed(t *testing.T) {
-	set := map[string]bool{"+1test": true}
-	if !Allowed(false, set, "+1test") || Allowed(false, set, "+2other") {
-		t.Fatal("allowlist not applied")
+func TestApprovalPromptText(t *testing.T) {
+	if got := ApprovalPromptText(relay.ApprovalRequest{Tool: "make"}); got != "🔧 make" {
+		t.Fatalf("bare: %q", got)
 	}
-	if Allowed(false, nil, "+1test") {
-		t.Fatal("empty allowlist must deny (fail closed)")
-	}
-	if !Allowed(true, nil, "+anyone") {
-		t.Fatal("allowAll must admit any key")
+	got := ApprovalPromptText(relay.ApprovalRequest{Tool: "make", Kind: "execute", Details: strings.Repeat("é", 1<<10+1)})
+	if want := "🔧 make\n\n" + strings.Repeat("é", 1<<10); got != want {
+		t.Fatalf("full: %q", got)
 	}
 }

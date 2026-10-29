@@ -137,3 +137,18 @@ func newTestStore(t *testing.T) *Store {
 	t.Cleanup(func() { _ = os.RemoveAll(dir) })
 	return s
 }
+
+func TestStore_RefusesSymlink(t *testing.T) {
+	dir := t.TempDir()
+	real := filepath.Join(dir, "real.json")
+	if err := os.WriteFile(real, []byte(`{}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(dir, "link.json")
+	if err := os.Symlink(real, link); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := NewStore(link); err == nil {
+		t.Fatal("symlinked store read")
+	}
+}

@@ -7,12 +7,15 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
-	"github.com/invokr-agent/agent-relay"
+	relay "github.com/invokr-agent/agent-relay"
 	"github.com/invokr-agent/agent-relay/internal/kit"
+	"github.com/invokr-agent/agent-relay/internal/signalrpc"
 )
 
 func pipeDialer() (func(string, string) (net.Conn, error), net.Conn) {
@@ -23,7 +26,6 @@ func pipeDialer() (func(string, string) (net.Conn, error), net.Conn) {
 	return dialer, server
 }
 
-// writeNotification writes a JSON-RPC receive notification to the server side.
 func writeNotification(conn net.Conn, source, message string) {
 	notif := map[string]any{
 		"jsonrpc": "2.0",
@@ -48,12 +50,12 @@ func writeRPCResponse(conn net.Conn, id float64) {
 
 func consumeSubscribe(conn net.Conn) {
 	scanner := bufio.NewScanner(conn)
-	scanner.Scan() // read subscribeReceive
+	scanner.Scan()
 	ack := `{"jsonrpc":"2.0","id":1,"result":{}}` + "\n"
 	_, _ = conn.Write([]byte(ack))
 }
 
-func newTestClient(t *testing.T, allowed []string, allowAll bool) (*Client, net.Conn) {
+func newTestClient(t *testing.T, allowed []string) (*Client, net.Conn) {
 	t.Helper()
 	dialer, server := pipeDialer()
 	var c *Client
@@ -63,7 +65,7 @@ func newTestClient(t *testing.T, allowed []string, allowAll bool) (*Client, net.
 		done <- struct{}{}
 	}()
 	var err error
-	c, err = newWithDialer("/fake.sock", allowed, allowAll, dialer)
+	c, err = newWithDialer("/fake.sock", "", allowed, dialer)
 	if err != nil {
 		t.Fatalf("newWithDialer: %v", err)
 	}
@@ -88,7 +90,7 @@ func TestNew_SubscribeSent(t *testing.T) {
 		ack := `{"jsonrpc":"2.0","id":1,"result":{}}` + "\n"
 		_, _ = server.Write([]byte(ack))
 	}()
-	_, err := newWithDialer("/fake.sock", nil, false, dialer)
+	_, err := newWithDialer("/fake.sock", "", nil, dialer)
 	if err != nil {
 		t.Fatalf("newWithDialer: %v", err)
 	}
@@ -113,7 +115,7 @@ func TestNew_PreservesNotificationBeforeSubscribeAck(t *testing.T) {
 		writeNotification(server, "+1allowed", "arrived during subscribe")
 		_, _ = server.Write([]byte(`{"jsonrpc":"2.0","id":1,"result":{}}` + "\n"))
 	}()
-	c, err := newWithDialer("/fake.sock", []string{"+1allowed"}, false, dialer)
+	c, err := newWithDialer("/fake.sock", "", []string{"+1allowed"}, dialer)
 	if err != nil {
 		t.Fatalf("newWithDialer: %v", err)
 	}
@@ -134,14 +136,14 @@ func TestNew_PreservesNotificationBeforeSubscribeAck(t *testing.T) {
 }
 
 func TestListen_AllowedNumber(t *testing.T) {
-	c, server := newTestClient(t, []string{"+12025551234"}, false)
+	c, server := newTestClient(t, []string{"+12025551234"})
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	ch, _ := c.Listen(ctx)
 	go writeNotification(server, "+12025551234", "hello signal")
 	select {
 	case msg := <-ch:
-		if msg.ChatID != "+12025551234" || msg.Text != "hello signal" {
+		if msg.ChatID != "+12025551234" || msg.SenderID != "+12025551234" || msg.Text != "hello signal" {
 			t.Fatalf("unexpected: %+v", msg)
 		}
 	case <-ctx.Done():
@@ -149,9 +151,8 @@ func TestListen_AllowedNumber(t *testing.T) {
 	}
 }
 
-// S3: inbound from blocked number — nothing on channel.
 func TestListen_BlockedNumber(t *testing.T) {
-	c, server := newTestClient(t, []string{"+1allowed"}, false)
+	c, server := newTestClient(t, []string{"+1allowed"})
 	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
 	defer cancel()
 	ch, _ := c.Listen(ctx)
@@ -162,13 +163,11 @@ func TestListen_BlockedNumber(t *testing.T) {
 			t.Fatalf("expected nothing, got %+v", msg)
 		}
 	case <-ctx.Done():
-		// correct
 	}
 }
 
-// S3b: empty allowlist denies everyone (fail closed).
 func TestListen_EmptyAllowlistDenies(t *testing.T) {
-	c, server := newTestClient(t, nil, false)
+	c, server := newTestClient(t, nil)
 	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
 	defer cancel()
 	ch, _ := c.Listen(ctx)
@@ -179,30 +178,38 @@ func TestListen_EmptyAllowlistDenies(t *testing.T) {
 			t.Fatalf("expected nothing with empty allowlist, got %+v", msg)
 		}
 	case <-ctx.Done():
-		// correct
 	}
 }
 
-// S3c: allow_all admits numbers not on any allowlist.
-func TestListen_AllowAllAdmits(t *testing.T) {
-	c, server := newTestClient(t, nil, true)
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
-	ch, _ := c.Listen(ctx)
-	go writeNotification(server, "+1anyone", "hello")
-	select {
-	case msg := <-ch:
-		if msg.ChatID != "+1anyone" || msg.Text != "hello" {
-			t.Fatalf("unexpected: %+v", msg)
-		}
-	case <-ctx.Done():
-		t.Fatal("timeout waiting for message with allow_all")
+func TestDialChecksPeer(t *testing.T) {
+	dir, err := os.MkdirTemp("", "sock")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = os.RemoveAll(dir) }()
+	path := filepath.Join(dir, "s")
+	l, err := net.Listen("unix", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = l.Close() }()
+	conn, err := signalrpc.Dial("unix", path)
+	if err != nil {
+		t.Fatalf("own socket refused: %v", err)
+	}
+	_ = conn.Close()
+	tcp, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = tcp.Close() }()
+	if _, err := signalrpc.Dial("tcp", tcp.Addr().String()); err == nil {
+		t.Fatal("non-Unix peer accepted")
 	}
 }
 
-// S4: Send method — correct JSON-RPC call with recipient array.
 func TestSend_RPCCall(t *testing.T) {
-	c, server := newTestClient(t, nil, false)
+	c, server := newTestClient(t, nil)
 	defer func() { _ = server.Close() }()
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
@@ -234,7 +241,7 @@ func TestSend_RPCCall(t *testing.T) {
 }
 
 func TestSetTyping_StartAndStop(t *testing.T) {
-	c, server := newTestClient(t, nil, false)
+	c, server := newTestClient(t, nil)
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 	_, _ = c.Listen(ctx)
@@ -268,7 +275,7 @@ func TestSetTyping_StartAndStop(t *testing.T) {
 }
 
 func TestAskApproval_YES(t *testing.T) {
-	c, server := newTestClient(t, nil, false)
+	c, server := newTestClient(t, nil)
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 	_, _ = c.Listen(ctx)
@@ -286,7 +293,7 @@ func TestAskApproval_YES(t *testing.T) {
 	}()
 
 	approved, err := c.AskApproval(ctx, "+1test", relay.ApprovalRequest{
-		ID: "req-yes", Tool: "shell", Summary: "test",
+		ID: "req-yes", Tool: "shell", Kind: "test",
 	})
 	if err != nil {
 		t.Fatalf("AskApproval: %v", err)
@@ -297,7 +304,7 @@ func TestAskApproval_YES(t *testing.T) {
 }
 
 func TestAskApproval_RegistersBeforeSendingPrompt(t *testing.T) {
-	c, server := newTestClient(t, nil, false)
+	c, server := newTestClient(t, nil)
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 	_, _ = c.Listen(ctx)
@@ -314,7 +321,7 @@ func TestAskApproval_RegistersBeforeSendingPrompt(t *testing.T) {
 	}()
 
 	approved, err := c.AskApproval(ctx, "+1test", relay.ApprovalRequest{
-		ID: "req-fast", Tool: "shell", Summary: "test",
+		ID: "req-fast", Tool: "shell", Kind: "test",
 	})
 	if err != nil {
 		t.Fatalf("AskApproval: %v", err)
@@ -357,7 +364,7 @@ func TestApprovalRepliesRouteByRequestID(t *testing.T) {
 }
 
 func TestAskApproval_NO(t *testing.T) {
-	c, server := newTestClient(t, nil, false)
+	c, server := newTestClient(t, nil)
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 	_, _ = c.Listen(ctx)
@@ -375,7 +382,7 @@ func TestAskApproval_NO(t *testing.T) {
 	}()
 
 	approved, err := c.AskApproval(ctx, "+1test", relay.ApprovalRequest{
-		ID: "req-no", Tool: "shell", Summary: "test",
+		ID: "req-no", Tool: "shell", Kind: "test",
 	})
 	if err != nil {
 		t.Fatalf("AskApproval: %v", err)
@@ -386,7 +393,7 @@ func TestAskApproval_NO(t *testing.T) {
 }
 
 func TestAskApproval_Cancel(t *testing.T) {
-	c, server := newTestClient(t, nil, false)
+	c, server := newTestClient(t, nil)
 	defer func() { _ = server.Close() }()
 	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
 	defer cancel()
@@ -404,9 +411,8 @@ func TestAskApproval_Cancel(t *testing.T) {
 	}
 }
 
-// S9: Long message chunked at 2000 runes.
 func TestSend_LongMessage(t *testing.T) {
-	c, server := newTestClient(t, nil, false)
+	c, server := newTestClient(t, nil)
 	defer func() { _ = server.Close() }()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -495,7 +501,7 @@ func TestListen_ReconnectsAfterCleanEOF(t *testing.T) {
 		}
 	}
 	go consumeSubscribe(server1)
-	c, err := newWithDialer("/fake.sock", []string{"+1allowed"}, false, dialer)
+	c, err := newWithDialer("/fake.sock", "", []string{"+1allowed"}, dialer)
 	if err != nil {
 		t.Fatalf("newWithDialer: %v", err)
 	}
@@ -504,9 +510,9 @@ func TestListen_ReconnectsAfterCleanEOF(t *testing.T) {
 	ch, _ := c.Listen(ctx)
 
 	go func() {
-		_ = server1.Close() // clean EOF on first conn
+		_ = server1.Close()
 		scanner := bufio.NewScanner(server2)
-		if !scanner.Scan() { // read resubscribe, ack with its real id
+		if !scanner.Scan() {
 			return
 		}
 		var msg map[string]any
@@ -536,7 +542,7 @@ func writeEnvelope(conn net.Conn, envelope map[string]any) {
 // Newer signal-cli sends a UUID as source; the number is in sourceNumber.
 // Group messages are skipped rather than answered as DMs.
 func TestListen_SourceNumberAndGroups(t *testing.T) {
-	c, server := newTestClient(t, []string{"+1allowed"}, false)
+	c, server := newTestClient(t, []string{"+1allowed"})
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	ch, _ := c.Listen(ctx)
@@ -558,7 +564,7 @@ func TestListen_SourceNumberAndGroups(t *testing.T) {
 
 // Lines past bufio.Scanner's 64 KiB default must not kill the connection.
 func TestListen_LongLine(t *testing.T) {
-	c, server := newTestClient(t, []string{"+1allowed"}, false)
+	c, server := newTestClient(t, []string{"+1allowed"})
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	ch, _ := c.Listen(ctx)
@@ -578,7 +584,7 @@ func TestListen_LongLine(t *testing.T) {
 func TestSend_TimesOutWithoutResponse(t *testing.T) {
 	defer func(d time.Duration) { rpcTimeout = d }(rpcTimeout)
 	rpcTimeout = 50 * time.Millisecond
-	c, server := newTestClient(t, nil, false)
+	c, server := newTestClient(t, nil)
 	go func() { _, _ = io.Copy(io.Discard, server) }()
 	done := make(chan error, 1)
 	go func() { done <- c.Send(context.Background(), "+1", "hi") }()
@@ -589,5 +595,69 @@ func TestSend_TimesOutWithoutResponse(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("Send hung without a response")
+	}
+}
+
+// Only the owner's own Note to Self arrives from sync messages; what the
+// owner sends to other people stays private.
+func TestNoteToSelf(t *testing.T) {
+	c := &Client{account: "+1me"}
+	sync := func(src, dest string) signalParams {
+		var p signalParams
+		if err := json.Unmarshal(fmt.Appendf(nil, `{"envelope":{"sourceNumber":%q,"syncMessage":{"sentMessage":{"message":"hi","destinationNumber":%q}}}}`, src, dest), &p); err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+	if src, text, ok := c.message(sync("+1me", "+1me")); !ok || src != "+1me" || text != "hi" {
+		t.Fatal("Note to Self dropped")
+	}
+	if _, _, ok := c.message(sync("+1me", "+1friend")); ok {
+		t.Fatal("message to someone else relayed")
+	}
+	if _, _, ok := (&Client{}).message(sync("+1me", "+1me")); ok {
+		t.Fatal("sync relayed without an account")
+	}
+	if got := c.withAccount(map[string]any{}); got["account"] != "+1me" {
+		t.Fatal("account not sent")
+	}
+}
+
+// A "YES" the owner sends from the phone to someone else is neither relayed
+// nor taken as an answer to the owner's pending approval.
+func TestSyncToThirdPartyIgnored(t *testing.T) {
+	c := &Client{account: "+1me", allowedNumbers: map[string]bool{"+1me": true, "+1friend": true}}
+	pending := &kit.PendingApproval{ChatID: "+1me", Decision: make(chan bool, 1)}
+	c.pending.Store("1", pending)
+	out := make(chan relay.Inbound, 1)
+	c.dispatchLine(context.Background(), []byte(`{"jsonrpc":"2.0","method":"receive","params":{"envelope":{"sourceNumber":"+1me","syncMessage":{"sentMessage":{"message":"YES 1","destinationNumber":"+1friend"}}}}}`), out)
+	if len(out) != 0 || len(pending.Decision) != 0 {
+		t.Fatal("sync message to a third party dispatched or approved")
+	}
+}
+
+// A third party's "YES n" never answers another chat's request.
+func TestThirdPartyCannotApproveOtherChat(t *testing.T) {
+	c := &Client{allowedNumbers: map[string]bool{"+1me": true, "+1friend": true}}
+	pending := &kit.PendingApproval{ChatID: "+1me", Decision: make(chan bool, 1)}
+	c.pending.Store("1", pending)
+	if c.handleApprovalReply("+1friend", "YES 1") || c.handleApprovalReply("+1friend", "yes") || len(pending.Decision) != 0 {
+		t.Fatal("third party approved another chat's request")
+	}
+}
+
+func TestParseApprovalReply(t *testing.T) {
+	for in, want := range map[string][3]any{
+		"yes":           {true, "", true},
+		"No  req-1":     {false, "req-1", true},
+		"YeS 7":         {true, "7", true},
+		"YES 1 2":       {false, "", false},
+		"yes please do": {false, "", false},
+		"maybe":         {false, "", false},
+	} {
+		a, id, ok := parseApprovalReply(in)
+		if [3]any{a, id, ok} != want {
+			t.Errorf("%q = %v %q %v", in, a, id, ok)
+		}
 	}
 }
