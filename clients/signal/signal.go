@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -37,7 +38,7 @@ var (
 type Client struct {
 	socketPath     string
 	account        string // set for a multi-account daemon; also Note to Self
-	allowedNumbers map[string]bool
+	allowedNumbers []string
 	conn           net.Conn
 	reader         *bufio.Scanner
 	preAckLines    [][]byte
@@ -61,11 +62,7 @@ func New(socketPath, account string, allowedNumbers []string) (*Client, error) {
 }
 
 func newWithDialer(socketPath, account string, allowedNumbers []string, dialer func(string, string) (net.Conn, error)) (*Client, error) {
-	allowed := make(map[string]bool, len(allowedNumbers))
-	for _, n := range allowedNumbers {
-		allowed[n] = true
-	}
-	c := &Client{socketPath: socketPath, account: account, allowedNumbers: allowed, dialer: dialer}
+	c := &Client{socketPath: socketPath, account: account, allowedNumbers: allowedNumbers, dialer: dialer}
 	conn, err := dialer("unix", socketPath)
 	if err != nil {
 		return nil, fmt.Errorf("signal: dial %s: %w", socketPath, err)
@@ -215,7 +212,7 @@ func (c *Client) dispatchLine(ctx context.Context, line []byte, out chan<- relay
 	if !ok || c.handleApprovalReply(source, text) {
 		return
 	}
-	if !c.allowedNumbers[source] {
+	if !slices.Contains(c.allowedNumbers, source) {
 		return
 	}
 	select {
@@ -235,10 +232,7 @@ func (c *Client) handleApprovalReply(source, text string) bool {
 	if pending == nil {
 		return false
 	}
-	select {
-	case pending.Decision <- approved:
-	default:
-	}
+	pending.Decide(approved)
 	return true
 }
 
@@ -259,18 +253,7 @@ func (c *Client) pendingForReply(source, requestID string) *kit.PendingApproval 
 		}
 		return value.(*kit.PendingApproval)
 	}
-	var match *kit.PendingApproval
-	n := 0
-	c.pending.Range(func(_, value any) bool {
-		if p := value.(*kit.PendingApproval); p.ChatID == source {
-			match, n = p, n+1
-		}
-		return n < 2
-	})
-	if n > 1 {
-		return nil
-	}
-	return match
+	return kit.PendingFor(&c.pending, source, "")
 }
 
 // Send calls the send JSON-RPC method, chunking at 2000 runes.
@@ -305,13 +288,11 @@ func buildApprovalPrompt(req relay.ApprovalRequest) string {
 		"\n\nReply YES <id> to approve or NO <id> to deny (bare YES/NO works when one request is pending).\nReply ID: " + req.ID
 }
 
+// rpc sends one JSON-RPC call and waits for the response with this id, bounded
+// by rpcTimeout so a dropped connection cannot hang the caller.
 func (c *Client) rpc(ctx context.Context, method string, params map[string]any) (json.RawMessage, error) {
 	ctx, cancel := context.WithTimeout(ctx, rpcTimeout)
 	defer cancel()
-	return c.call(ctx, method, params)
-}
-
-func (c *Client) call(ctx context.Context, method string, params map[string]any) (json.RawMessage, error) {
 	id := c.nextID.Add(1)
 	raw := signalrpc.Frame(id, method, c.withAccount(params))
 	ch := make(chan signalrpc.Message, 1)

@@ -199,9 +199,9 @@ func applyTelegram(cfg *config.Config, a Answers) error {
 	if cfg.Telegram == nil {
 		cfg.Telegram = &config.Telegram{}
 	}
-	if list, ok := a["allowed_user_ids"]; ok {
+	if list, ok := listed(a, "allowed_user_ids"); ok {
 		cfg.Telegram.AllowedUserIDs = []int64{}
-		for _, s := range splitList(list) {
+		for _, s := range list {
 			id, err := strconv.ParseInt(s, 10, 64)
 			if err != nil {
 				return &FieldError{"allowed_user_ids", "is not valid"}
@@ -217,11 +217,8 @@ func applyMatrix(cfg *config.Config, a Answers) {
 		cfg.Matrix = &config.Matrix{}
 	}
 	cfg.Matrix.Homeserver, cfg.Matrix.UserID = strings.TrimRight(a["homeserver"], "/"), a["user_id"]
-	if list, ok := a["allowed_users"]; ok {
-		cfg.Matrix.AllowedUsers = []string{}
-		for _, u := range splitList(list) {
-			cfg.Matrix.AllowedUsers = appendNew(cfg.Matrix.AllowedUsers, u)
-		}
+	if list, ok := listed(a, "allowed_users"); ok {
+		cfg.Matrix.AllowedUsers = list
 	}
 }
 
@@ -233,12 +230,20 @@ func applySignal(cfg *config.Config, a Answers) {
 	if a["account"] != "" {
 		cfg.Signal.Account = a["account"]
 	}
-	if list, ok := a["allowed_numbers"]; ok {
-		cfg.Signal.AllowedNumbers = []string{}
-		for _, n := range splitList(list) {
-			cfg.Signal.AllowedNumbers = appendNew(cfg.Signal.AllowedNumbers, n)
-		}
+	if list, ok := listed(a, "allowed_numbers"); ok {
+		cfg.Signal.AllowedNumbers = list
 	}
+}
+
+// listed is the answer for key as a de-duplicated list, and whether the answer
+// was present at all: an empty answer clears the stored list.
+func listed(a Answers, key string) ([]string, bool) {
+	list, ok := a[key]
+	var out []string
+	for _, v := range splitList(list) {
+		out = appendNew(out, v)
+	}
+	return out, ok
 }
 
 func splitList(s string) []string {

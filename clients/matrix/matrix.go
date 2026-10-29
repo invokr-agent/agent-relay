@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -35,7 +36,7 @@ var (
 type Client struct {
 	api         mxapi.API
 	self        string
-	allowed     map[string]bool
+	allowed     []string
 	allowGroups bool
 	sincePath   string
 	pending     sync.Map // request ID → *kit.PendingApproval
@@ -53,13 +54,9 @@ func New(homeserver, userID, token string, allowedUsers []string, allowGroups bo
 	if err := mxapi.CheckHomeserver(homeserver); err != nil {
 		return nil, err
 	}
-	allowed := map[string]bool{}
-	for _, u := range allowedUsers {
-		allowed[u] = true
-	}
 	return &Client{api: mxapi.API{HC: &http.Client{Timeout: pollTimeout + 30*time.Second},
 		Homeserver: mxapi.Home(homeserver), AccessToken: token},
-		self: userID, allowed: allowed, allowGroups: allowGroups, sincePath: sincePath}, nil
+		self: userID, allowed: allowedUsers, allowGroups: allowGroups, sincePath: sincePath}, nil
 }
 
 func (c *Client) Name() string { return "matrix" }
@@ -108,13 +105,13 @@ func (c *Client) syncLoop(ctx context.Context, out chan<- relay.Inbound) {
 // backlog, dispatches their events in the timeline.
 func (c *Client) handle(ctx context.Context, s mxapi.Sync, deliver bool, out chan<- relay.Inbound) {
 	for room, inv := range s.Rooms.Invite {
-		if c.allowed[mxapi.Inviter(inv.State.Events, c.self)] {
+		if slices.Contains(c.allowed, mxapi.Inviter(inv.State.Events, c.self)) {
 			_ = c.api.Join(ctx, room)
 		}
 	}
 	for room, j := range s.Rooms.Join {
 		for _, e := range j.Timeline.Events {
-			if deliver && e.Sender != c.self && c.allowed[e.Sender] {
+			if deliver && e.Sender != c.self && slices.Contains(c.allowed, e.Sender) {
 				c.dispatch(ctx, room, e, out)
 			}
 		}
@@ -169,17 +166,11 @@ func (c *Client) answer(room, sender, text string) bool {
 	if verb != "yes" && verb != "no" {
 		return false
 	}
-	var ids []string
-	c.pending.Range(func(id, v any) bool {
-		if p := v.(*kit.PendingApproval); p.ChatID == room && p.Sender == sender {
-			ids = append(ids, id.(string))
-		}
-		return true
-	})
-	if len(ids) != 1 {
+	p := kit.PendingFor(&c.pending, room, sender)
+	if p == nil {
 		return false
 	}
-	c.decide(room, sender, ids[0], verb == "yes")
+	p.Decide(verb == "yes")
 	return true
 }
 
@@ -190,10 +181,7 @@ func (c *Client) decide(room, sender, id string, approved bool) {
 	if !ok || p.ChatID != room || p.Sender != sender {
 		return
 	}
-	select {
-	case p.Decision <- approved:
-	default:
-	}
+	p.Decide(approved)
 }
 
 // Send posts text to the room as notices of at most chunkLimit runes.

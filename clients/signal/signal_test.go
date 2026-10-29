@@ -626,7 +626,7 @@ func TestNoteToSelf(t *testing.T) {
 // A "YES" the owner sends from the phone to someone else is neither relayed
 // nor taken as an answer to the owner's pending approval.
 func TestSyncToThirdPartyIgnored(t *testing.T) {
-	c := &Client{account: "+1me", allowedNumbers: map[string]bool{"+1me": true, "+1friend": true}}
+	c := &Client{account: "+1me", allowedNumbers: []string{"+1me", "+1friend"}}
 	pending := &kit.PendingApproval{ChatID: "+1me", Decision: make(chan bool, 1)}
 	c.pending.Store("1", pending)
 	out := make(chan relay.Inbound, 1)
@@ -638,7 +638,7 @@ func TestSyncToThirdPartyIgnored(t *testing.T) {
 
 // A third party's "YES n" never answers another chat's request.
 func TestThirdPartyCannotApproveOtherChat(t *testing.T) {
-	c := &Client{allowedNumbers: map[string]bool{"+1me": true, "+1friend": true}}
+	c := &Client{allowedNumbers: []string{"+1me", "+1friend"}}
 	pending := &kit.PendingApproval{ChatID: "+1me", Decision: make(chan bool, 1)}
 	c.pending.Store("1", pending)
 	if c.handleApprovalReply("+1friend", "YES 1") || c.handleApprovalReply("+1friend", "yes") || len(pending.Decision) != 0 {

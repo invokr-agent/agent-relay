@@ -107,8 +107,8 @@ func pairTelegram(ctx context.Context, t *config.Telegram, dir string, emit func
 		return err
 	}
 	var offset int64
-	for _, u := range updates {
-		offset = u.UpdateID + 1
+	if n := len(updates); n > 0 {
+		offset = updates[n-1].UpdateID + 1
 	}
 	code, issued := newCode(), time.Now().Unix()
 	deadline, _ := ctx.Deadline()
