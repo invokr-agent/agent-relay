@@ -59,10 +59,7 @@ func Pair(ctx context.Context, path, client string, emit func(Event)) error {
 	}
 	switch {
 	case client == "telegram" && cfg.Telegram != nil:
-		var api string
-		if api, err = cfg.TelegramAPI(); err == nil {
-			err = pairTelegram(ctx, cfg.Telegram, api, filepath.Dir(path), emit)
-		}
+		err = pairTelegram(ctx, cfg.Telegram, filepath.Dir(path), emit)
 	case client == "signal" && cfg.Signal != nil:
 		err = pairSignal(ctx, cfg.Signal, emit)
 	default:
@@ -91,18 +88,18 @@ func newCode() string {
 // pairTelegram long-polls the bot until a private chat sends the code (or
 // /start CODE through the t.me link). Run it with the relay stopped:
 // Telegram serves getUpdates to one poller.
-func pairTelegram(ctx context.Context, t *config.Telegram, api, dir string, emit func(Event)) error {
+func pairTelegram(ctx context.Context, t *config.Telegram, dir string, emit func(Event)) error {
 	token, err := secrets.Get(dir, secrets.TelegramToken)
 	if err != nil {
 		return err
 	}
-	me, err := telegramMe(ctx, api, token)
+	me, err := telegramMe(ctx, token)
 	if err != nil {
 		return err
 	}
 	// Skip the backlog: offset -1 returns only the latest update.
 	var updates []tgapi.Update
-	if err := telegramCall(ctx, api, token, "getUpdates", map[string]any{"offset": -1}, &updates); err != nil {
+	if err := telegramCall(ctx, token, "getUpdates", map[string]any{"offset": -1}, &updates); err != nil {
 		return err
 	}
 	var offset int64
@@ -117,7 +114,7 @@ func pairTelegram(ctx context.Context, t *config.Telegram, api, dir string, emit
 	attempts := map[int64]int{}
 	for {
 		params := map[string]any{"offset": offset, "timeout": 25, "allowed_updates": []string{"message"}}
-		if err := telegramCall(ctx, api, token, "getUpdates", params, &updates); err != nil {
+		if err := telegramCall(ctx, token, "getUpdates", params, &updates); err != nil {
 			return err
 		}
 		for _, u := range updates {
@@ -125,9 +122,9 @@ func pairTelegram(ctx context.Context, t *config.Telegram, api, dir string, emit
 			if user := matchCode(u, code, issued, attempts); user != nil {
 				// Confirm the offset so the relay does not see the code later;
 				// a failure only means the relay sees one stale message.
-				_ = telegramCall(ctx, api, token, "getUpdates", map[string]any{"offset": offset}, &[]tgapi.Update{})
+				_ = telegramCall(ctx, token, "getUpdates", map[string]any{"offset": offset}, &[]tgapi.Update{})
 				t.AllowedUserIDs = appendNew(t.AllowedUserIDs, user.ID)
-				_ = telegramCall(ctx, api, token, "sendMessage", map[string]any{"chat_id": user.ID, "text": "Paired with agent-relay."}, &struct{}{})
+				_ = telegramCall(ctx, token, "sendMessage", map[string]any{"chat_id": user.ID, "text": "Paired with agent-relay."}, &struct{}{})
 				emit(Event{Event: "paired", UserID: user.ID, Name: user.Username})
 				return nil
 			}

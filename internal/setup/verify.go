@@ -11,9 +11,12 @@ import (
 	"github.com/invokr-agent/agent-relay/internal/tgapi"
 )
 
-// telegramCall posts a Bot API method to api and decodes its result.
-func telegramCall(ctx context.Context, api, token, method string, params, result any) error {
-	err := tgapi.Call(ctx, http.DefaultClient, api, token, method, params, result)
+// telegramAPI is the Bot API base URL; tests point it at a fake.
+var telegramAPI = "https://api.telegram.org"
+
+// telegramCall posts a Bot API method and decodes its result.
+func telegramCall(ctx context.Context, token, method string, params, result any) error {
+	err := tgapi.Call(ctx, http.DefaultClient, telegramAPI, token, method, params, result)
 	if e, ok := errors.AsType[*tgapi.APIError](err); ok && e.Code == http.StatusConflict {
 		return errors.New("setup: telegram: another poller holds this bot; stop agent-relay (or deleteWebhook) before pairing")
 	}
@@ -23,9 +26,9 @@ func telegramCall(ctx context.Context, api, token, method string, params, result
 	return nil
 }
 
-func telegramMe(ctx context.Context, api, token string) (tgapi.User, error) {
+func telegramMe(ctx context.Context, token string) (tgapi.User, error) {
 	var me tgapi.User
-	err := telegramCall(ctx, api, token, "getMe", map[string]any{}, &me)
+	err := telegramCall(ctx, token, "getMe", map[string]any{}, &me)
 	if e, ok := errors.AsType[*tgapi.APIError](err); ok && e.Code == http.StatusUnauthorized {
 		err = &FieldError{"token", "was refused by Telegram"}
 	}

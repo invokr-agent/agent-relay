@@ -154,11 +154,7 @@ func buildClients(cfg config.Config, dir string) ([]relay.Client, error) {
 		if err != nil {
 			return nil, fmt.Errorf("telegram token: %w (run agent-relay setup)", err)
 		}
-		api, err := cfg.TelegramAPI()
-		if err != nil {
-			return nil, err
-		}
-		c, err := telegram.New(token, t.AllowedUserIDs, t.AllowGroups, api)
+		c, err := telegram.New(token, t.AllowedUserIDs, t.AllowGroups)
 		if err != nil {
 			return nil, err
 		}

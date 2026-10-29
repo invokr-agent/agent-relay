@@ -68,7 +68,7 @@ func TestApprovalIdentityAndCleanup(t *testing.T) {
 			}))
 			defer server.Close()
 			var err error
-			client, err = New("identity", []int64{7}, true, server.URL)
+			client, err = newWithBaseURL("identity", []int64{7}, true, server.URL)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -126,7 +126,7 @@ func TestUnacceptedCallbacksNeverClaimDecision(t *testing.T) {
 				_, _ = fmt.Fprint(w, `{"ok":true,"result":true}`)
 			}))
 			defer server.Close()
-			client, err := New("neutral", []int64{7}, true, server.URL)
+			client, err := newWithBaseURL("neutral", []int64{7}, true, server.URL)
 			if err != nil {
 				t.Fatal(err)
 			}

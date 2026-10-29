@@ -21,18 +21,12 @@ func (e *APIError) Error() string {
 	return fmt.Sprintf("telegram: %s error %d: %s", e.Method, e.Code, e.Description)
 }
 
-// DefaultBaseURL is Telegram's Bot API, used when Call gets no baseURL.
-const DefaultBaseURL = "https://api.telegram.org"
-
 // Call posts a Bot API method and decodes its result into result, if non-nil.
 // Errors never carry the request URL, which holds the token.
 func Call(ctx context.Context, hc *http.Client, baseURL, token, method string, params, result any) error {
 	body, err := json.Marshal(params)
 	if err != nil {
 		return fmt.Errorf("telegram: marshal %s: %w", method, err)
-	}
-	if baseURL == "" {
-		baseURL = DefaultBaseURL
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, baseURL+"/bot"+token+"/"+method, bytes.NewReader(body))
 	if err != nil {

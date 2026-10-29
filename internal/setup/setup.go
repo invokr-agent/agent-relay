@@ -119,14 +119,7 @@ func verify(ctx context.Context, path, client string, a Answers) error {
 		if token == "" {
 			token, _ = secrets.Get(filepath.Dir(path), secrets.TelegramToken)
 		}
-		cfg, err := config.Load(path)
-		if err != nil {
-			return err
-		}
-		api, err := cfg.TelegramAPI()
-		if err == nil {
-			_, err = telegramMe(ctx, api, token)
-		}
+		_, err := telegramMe(ctx, token)
 		return err
 	}
 	return signalPing(ctx, a["socket"])

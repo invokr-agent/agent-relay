@@ -8,10 +8,8 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
-	"net/url"
 	"os"
 	"path/filepath"
-	"slices"
 	"sync"
 	"syscall"
 )
@@ -34,7 +32,6 @@ type Config struct {
 type Telegram struct {
 	AllowedUserIDs []int64 `json:"allowed_user_ids"`
 	AllowGroups    bool    `json:"allow_groups,omitempty"`
-	BaseURL        string  `json:"base_url,omitempty"` // a local fake Bot API, for tests
 	// Version 0 fields, read for migration only.
 	LegacyToken    string  `json:"token,omitempty"`
 	LegacyChatIDs  []int64 `json:"allowed_chat_ids,omitempty"`
@@ -87,22 +84,6 @@ func Load(path string) (Config, error) {
 	}
 	cfg.Version = Version
 	return cfg, nil
-}
-
-// TelegramAPI is the Bot API base URL override: AGENT_RELAY_TELEGRAM_BASE_URL,
-// else telegram.base_url, else "" for Telegram's own. An override must be
-// Telegram or a loopback server: the token travels in every request URL.
-func (c Config) TelegramAPI() (string, error) {
-	v := os.Getenv("AGENT_RELAY_TELEGRAM_BASE_URL")
-	if v == "" && c.Telegram != nil {
-		v = c.Telegram.BaseURL
-	}
-	u, err := url.Parse(v)
-	if v == "" || err == nil && (u.Scheme == "https" && u.Host == "api.telegram.org" ||
-		(u.Scheme == "http" || u.Scheme == "https") && slices.Contains([]string{"127.0.0.1", "::1"}, u.Hostname())) {
-		return v, nil
-	}
-	return "", errors.New("config: telegram base_url must be http(s) on 127.0.0.1 or ::1")
 }
 
 var warnDropped sync.Once

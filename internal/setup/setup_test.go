@@ -34,7 +34,9 @@ func fakeTelegram(t *testing.T, handle func(w http.ResponseWriter, method string
 		handle(w, strings.TrimPrefix(r.URL.Path, "/bot"+token+"/"))
 	}))
 	t.Cleanup(srv.Close)
-	t.Setenv("AGENT_RELAY_TELEGRAM_BASE_URL", srv.URL)
+	old := telegramAPI
+	telegramAPI = srv.URL
+	t.Cleanup(func() { telegramAPI = old })
 }
 
 func getMe(w http.ResponseWriter, _ string) {
