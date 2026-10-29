@@ -8,7 +8,6 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
-	"os"
 	"strings"
 	"sync"
 	"time"
@@ -59,7 +58,7 @@ func New(homeserver, userID, token string, allowedUsers []string, allowGroups bo
 		allowed[u] = true
 	}
 	return &Client{api: mxapi.API{HC: &http.Client{Timeout: pollTimeout + 30*time.Second},
-		Homeserver: strings.TrimRight(homeserver, "/"), AccessToken: token},
+		Homeserver: mxapi.Home(homeserver), AccessToken: token},
 		self: userID, allowed: allowed, allowGroups: allowGroups, sincePath: sincePath}, nil
 }
 
@@ -75,7 +74,7 @@ func (c *Client) Listen(ctx context.Context) (<-chan relay.Inbound, error) {
 
 func (c *Client) syncLoop(ctx context.Context, out chan<- relay.Inbound) {
 	defer close(out)
-	data, _ := os.ReadFile(c.sincePath)
+	data, _ := config.ReadFile(c.sincePath, 0o022)
 	since, backoff := strings.TrimSpace(string(data)), time.Second
 	for ctx.Err() == nil {
 		timeout := pollTimeout
