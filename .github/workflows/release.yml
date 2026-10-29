@@ -39,7 +39,7 @@ jobs:
       # Installed with go rather than sigstore/cosign-installer: the org only
       # allows GitHub-owned and a few listed actions.
       - name: Install cosign
-        run: go install github.com/sigstore/cosign/v2/cmd/cosign@v2.4.1
+        run: go install github.com/sigstore/cosign/v2/cmd/cosign@v2.6.5
       - uses: goreleaser/goreleaser-action@a4f02ab5355a589de60d917a659ce617ed19b3de # v7.3.0
         with:
           args: release --clean
