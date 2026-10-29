@@ -1,6 +1,6 @@
 version: "2"
 linters:
-  # The same complexity limits invokr keeps; tests are exempt, as there.
+  # Complexity limits; tests are exempt.
   enable: [gocyclo, gocognit, funlen, nestif, dupl, misspell, goclocbudget]
   settings:
     gocyclo:

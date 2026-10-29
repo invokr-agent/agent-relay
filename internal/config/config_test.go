@@ -11,7 +11,7 @@ import (
 
 func TestSaveLoadRoundTripAndModes(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "agent-relay", "config.json")
-	want := Config{Agent: []string{"invokr", "acp"}, Telegram: &Telegram{AllowedUserIDs: []int64{7}}}
+	want := Config{Agent: []string{"my-agent", "acp"}, Telegram: &Telegram{AllowedUserIDs: []int64{7}}}
 	if err := Save(path, want); err != nil {
 		t.Fatal(err)
 	}

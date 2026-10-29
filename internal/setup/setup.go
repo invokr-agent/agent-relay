@@ -1,5 +1,5 @@
 // Package setup describes, verifies and applies each client's configuration.
-// It has no UI: the agent-relay CLI and other front ends (such as invokr)
+// It has no UI: the agent-relay CLI and other front ends
 // render the descriptors and send back answers.
 package setup
 
@@ -44,7 +44,7 @@ type Descriptor struct {
 // its JSON array text.
 type Answers map[string]string
 
-var agentField = Field{Key: "agent", Label: "Agent command", Type: "list", Help: `ACP agent argv, run without a shell: a JSON array (e.g. ["invokr","acp"]); interactive setup splits on spaces`}
+var agentField = Field{Key: "agent", Label: "Agent command", Type: "list", Help: `ACP agent argv, run without a shell: a JSON array (e.g. ["my-agent","acp"]); interactive setup splits on spaces`}
 
 var descriptors = []Descriptor{
 	{Client: "telegram", Pairing: "code", Notice: "Telegram is not end-to-end encrypted; prefer Signal for sensitive work.",

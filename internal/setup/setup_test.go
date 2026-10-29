@@ -78,12 +78,12 @@ func TestApplyTelegram(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	fakeTelegram(t, getMe)
 	path := config.Path()
-	err := Apply(context.Background(), path, "telegram", Answers{"token": token, "allowed_user_ids": "7, 8, 7", "agent": `["invokr acp", "--x"]`})
+	err := Apply(context.Background(), path, "telegram", Answers{"token": token, "allowed_user_ids": "7, 8, 7", "agent": `["my-agent acp", "--x"]`})
 	if err != nil {
 		t.Fatal(err)
 	}
 	cfg, _ := config.Load(path)
-	if ids := cfg.Telegram.AllowedUserIDs; len(ids) != 2 || cfg.Agent[0] != "invokr acp" || cfg.Agent[1] != "--x" {
+	if ids := cfg.Telegram.AllowedUserIDs; len(ids) != 2 || cfg.Agent[0] != "my-agent acp" || cfg.Agent[1] != "--x" {
 		t.Fatalf("config = %+v", cfg)
 	}
 	if data, _ := os.ReadFile(path); strings.Contains(string(data), token) {
@@ -192,7 +192,7 @@ func TestApplyRejectsUnknownAndOverflow(t *testing.T) {
 	fakeTelegram(t, getMe)
 	for key, a := range map[string]Answers{
 		"bogus":            {"token": token, "bogus": "s3cret"},
-		"agent":            {"token": token, "agent": "invokr acp"},
+		"agent":            {"token": token, "agent": "my-agent acp"},
 		"allowed_user_ids": {"token": token, "allowed_user_ids": "99999999999999999999", "agent": `["a"]`},
 	} {
 		err := Apply(context.Background(), config.Path(), "telegram", a)

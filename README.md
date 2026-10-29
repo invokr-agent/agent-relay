@@ -1,6 +1,6 @@
 # agent-relay
 
-Chat with a coding agent from Telegram, Matrix or Signal. agent-relay is an [ACP](https://agentclientprotocol.com) client: it spawns any ACP agent, such as `invokr acp` or another agent with ACP support, and bridges your chats to it. Linux and macOS only.
+Chat with a coding agent from Telegram, Matrix or Signal. agent-relay is an [ACP](https://agentclientprotocol.com) client: it spawns any ACP agent (e.g. `my-agent acp`) and bridges your chats to it. Linux and macOS only.
 
 - **Sessions:** each chat has its own agent session. It is kept across restarts and resumed with `session/load` when the agent supports it; replayed history is not posted again.
 - **Turns:** a chat's messages run one turn at a time. The streamed answer is posted as one message, split to the platform's size limit.
@@ -26,19 +26,23 @@ agent-relay setup --apply telegram <answers.json
 
 **Protocol.** `--describe` and `--apply` write exactly one JSON document to stdout, `--pair` an event stream; this holds for every failure too (bad flags, unknown client), and nothing is repeated on stderr. Exit status is 0 on success, 1 on any error. Documents carry `"setup_protocol":1` and `"ok"`; a failure adds `"error"` and, for a bad answer, `"field":"<key>"`. `--describe` lists `clients`; a secret field already stored has `"stored":true` and may be left out.
 
-`--apply` reads one JSON object (at most 64 KiB; unknown keys refused) of strings, except that a field with `"type":"list"` takes a JSON array of strings: `"agent": ["invokr", "acp"]`. Interactive setup splits the agent command on spaces, so an argument containing spaces needs `--apply` or the config file. Field `pattern`s are Go RE2 regexps matched against the trimmed answer; a list answer replaces the stored list (`""` clears it), an omitted key keeps it. `agent` is required until the config has one. It validates the answers, verifies them (Telegram `getMe`, Matrix `whoami` matching `user_id`, a signal-cli ping), merges them into the config, then stores secrets. Secrets are never printed. Front ends such as invokr drive `--describe`/`--apply`; the internal `setup` package holds the same logic without UI.
+`--apply` reads one JSON object (at most 64 KiB; unknown keys refused) of strings, except that a field with `"type":"list"` takes a JSON array of strings: `"agent": ["my-agent","acp"]`. Interactive setup splits the agent command on spaces, so an argument containing spaces needs `--apply` or the config file. Field `pattern`s are Go RE2 regexps matched against the trimmed answer; a list answer replaces the stored list (`""` clears it), an omitted key keeps it. `agent` is required until the config has one. It validates the answers, verifies them (Telegram `getMe`, Matrix `whoami` matching `user_id`, a signal-cli ping), merges them into the config, then stores secrets. Secrets are never printed. Other front ends can drive `--describe`/`--apply`; the internal `setup` package holds the same logic without UI.
 
 ## Run
 
 ```
 go install github.com/invokr-agent/agent-relay/cmd/agent-relay@latest
-agent-relay   # reads $XDG_CONFIG_HOME/agent-relay/config.json
+agent-relay                        # reads $XDG_CONFIG_HOME/agent-relay/config.json
+agent-relay -config /path/to/config.json
+agent-relay -version               # prints the version and exits
 ```
+
+`-config` defaults to `$XDG_CONFIG_HOME/agent-relay/config.json` (an explicit path is used as given). `-version` prints the version built into the binary — goreleaser stamps the release tag, a checkout of the source prints `dev` — and exits 0 without reading the config or starting any client. Both flags are parsed only for the plain run form; `setup` and `service` take their own arguments.
 
 ```json
 {
   "version": 1,
-  "agent": ["invokr", "acp"],
+  "agent": ["my-agent","acp"],
   "cwd": "/home/me/project",
   "telegram": {"allowed_user_ids": [123456789]},
   "matrix": {"homeserver": "https://matrix.example.org", "user_id": "@relay:example.org", "allowed_users": ["@me:example.org"]},
@@ -79,7 +83,7 @@ Substitute the release tag for `vX.Y.Z`.
 
 `make e2e` (needs Docker) starts a [Continuwuity](https://continuwuity.org) homeserver, pinned by digest in `cmd/agent-relay/matrix_e2e_test.go`, registers a bot and users, and drives setup, pairing, replies, approvals, `/cancel` and shutdown of a real agent-relay through it; the container is removed afterwards. `scripts/matrix-dev.sh` starts the same homeserver on `127.0.0.1:8008` and prints a bot token and a user login for trying the relay by hand with a client such as gomuks or Element.
 
-`make lint` applies the same complexity limits as invokr.
+`make lint` runs golangci-lint with complexity limits and a LOC budget.
 
 ## License
 

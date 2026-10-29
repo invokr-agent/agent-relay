@@ -1,7 +1,7 @@
 .PHONY: test lint verify build e2e
 
 # Built from tools/customlint (a separate module) with plain `go build`; it
-# adds the goclocbudget plugin to golangci-lint, as in invokr.
+# adds the goclocbudget plugin to golangci-lint.
 custom-golangci-lint: tools/customlint/main.go tools/customlint/go.mod tools/customlint/go.sum
 	go build -C tools/customlint -o "$(CURDIR)/custom-golangci-lint" .
 

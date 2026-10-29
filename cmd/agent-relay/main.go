@@ -9,7 +9,7 @@
 //
 //	{
 //	  "version": 1,
-//	  "agent": ["invokr", "acp"],
+//	  "agent": ["my-agent","acp"],
 //	  "cwd": "/home/me/project",
 //	  "telegram": {"allowed_user_ids": [123456789]},
 //	  "signal": {"socket": "/run/user/1000/signal-cli/socket", "allowed_numbers": ["+15551234567"]}
@@ -135,7 +135,7 @@ func load(path string) (config.Config, error) {
 		return cfg, err
 	}
 	if len(cfg.Agent) == 0 {
-		return cfg, errors.New(`config: "agent" names the ACP agent argv, e.g. ["invokr", "acp"]`)
+		return cfg, errors.New(`config: "agent" names the ACP agent argv, e.g. ["my-agent","acp"]`)
 	}
 	if cfg.Cwd == "" {
 		cfg.Cwd, _ = os.Getwd()

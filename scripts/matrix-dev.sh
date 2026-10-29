@@ -26,7 +26,7 @@ cat <<END
 homeserver:    $hs
 bot:           @relay:localhost  access token $token
 user:          @alice:localhost  password alice-password
-setup:         echo '{"homeserver":"$hs","user_id":"@relay:localhost","access_token":"$token","agent":["invokr","acp"]}' | agent-relay setup --apply matrix
+setup:         echo '{"homeserver":"$hs","user_id":"@relay:localhost","access_token":"$token","agent":["my-agent","acp"]}' | agent-relay setup --apply matrix
                agent-relay setup --pair matrix
 stop:          docker rm -f agent-relay-matrix
 END
