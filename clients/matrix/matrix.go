@@ -5,6 +5,7 @@ package matrix
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"os"
@@ -50,6 +51,9 @@ func New(homeserver, userID, token string, allowedUsers []string, allowGroups bo
 	if strings.TrimSpace(token) == "" {
 		return nil, errors.New("matrix: access token is required")
 	}
+	if err := mxapi.CheckHomeserver(homeserver); err != nil {
+		return nil, err
+	}
 	allowed := map[string]bool{}
 	for _, u := range allowedUsers {
 		allowed[u] = true
@@ -79,6 +83,11 @@ func (c *Client) syncLoop(ctx context.Context, out chan<- relay.Inbound) {
 			timeout = 0
 		}
 		s, err := c.api.Sync(ctx, since, timeout)
+		if mxapi.Rejected(err) && since != "" {
+			slog.Warn("matrix: sync position refused; skipping the backlog", "err", err)
+			since = ""
+			continue
+		}
 		if err != nil {
 			if mxapi.Unauthorized(err) || !kit.WaitBackoff(ctx, &backoff, maxBackoff) {
 				return
@@ -86,9 +95,13 @@ func (c *Client) syncLoop(ctx context.Context, out chan<- relay.Inbound) {
 			continue
 		}
 		backoff = time.Second
-		c.handle(ctx, s, since != "", out)
+		deliver := since != ""
 		since = s.NextBatch
-		_ = config.WriteFile(c.sincePath, []byte(since))
+		if err := config.WriteFile(c.sincePath, []byte(since)); err != nil {
+			slog.Error("matrix: saving the sync position failed; dropping the batch", "err", err)
+			continue
+		}
+		c.handle(ctx, s, deliver, out)
 	}
 }
 
@@ -118,7 +131,7 @@ func (c *Client) dispatch(ctx context.Context, room string, e mxapi.Event, out c
 			_, _ = c.api.Send(ctx, room, "m.room.message", mxapi.Notice(encryptedNotice))
 		}
 	case e.Text() && !c.answer(room, e.Sender, e.Content.Body):
-		if direct, err := c.api.Direct(ctx, room); err != nil || !direct && !c.allowGroups {
+		if !c.admits(ctx, room) {
 			return
 		}
 		select {
@@ -126,6 +139,19 @@ func (c *Client) dispatch(ctx context.Context, room string, e mxapi.Event, out c
 		case <-ctx.Done():
 		}
 	}
+}
+
+// admits reports whether output may go to room: a two-member one unless
+// allowGroups, checked anew as members may have joined since.
+func (c *Client) admits(ctx context.Context, room string) bool {
+	if c.allowGroups {
+		return true
+	}
+	direct, err := c.api.Direct(ctx, room)
+	if err != nil || !direct {
+		slog.Warn("matrix: room is not direct; dropping output", "room", room, "err", err)
+	}
+	return err == nil && direct
 }
 
 // react takes a 👍 or 👎 on an approval prompt as its answer.
@@ -160,18 +186,22 @@ func (c *Client) answer(room, sender, text string) bool {
 
 // decide delivers the approver's answer; others' are ignored.
 func (c *Client) decide(room, sender, id string, approved bool) {
-	v, ok := c.pending.Load(id)
-	if !ok || v.(*kit.PendingApproval).ChatID != room || v.(*kit.PendingApproval).Sender != sender {
+	v, _ := c.pending.Load(id)
+	p, ok := v.(*kit.PendingApproval)
+	if !ok || p.ChatID != room || p.Sender != sender {
 		return
 	}
 	select {
-	case v.(*kit.PendingApproval).Decision <- approved:
+	case p.Decision <- approved:
 	default:
 	}
 }
 
 // Send posts text to the room as notices of at most chunkLimit runes.
 func (c *Client) Send(ctx context.Context, chatID string, text string) error {
+	if !c.admits(ctx, chatID) {
+		return nil
+	}
 	for _, chunk := range kit.ChunkMessage(text, chunkLimit) {
 		if _, err := c.api.Send(ctx, chatID, "m.room.message", mxapi.Notice(chunk)); err != nil {
 			return err
@@ -185,9 +215,14 @@ func (c *Client) Send(ctx context.Context, chatID string, text string) error {
 func (c *Client) AskApproval(ctx context.Context, chatID string, req relay.ApprovalRequest) (bool, error) {
 	var prompt string
 	approved, err := kit.AwaitApproval(ctx, &c.pending, c.Name(), chatID, req.Approver, req, func(req relay.ApprovalRequest) error {
+		if !c.admits(ctx, chatID) {
+			return errors.New("matrix: room is not direct")
+		}
 		var err error
 		prompt, err = c.api.Send(ctx, chatID, "m.room.message", mxapi.Notice(kit.ApprovalPromptText(req)+"\n\nReact 👍 to approve or 👎 to deny, or reply yes or no."))
-		c.prompts.Store(prompt, req.ID)
+		if err == nil {
+			c.prompts.Store(prompt, req.ID)
+		}
 		return err
 	})
 	c.prompts.Delete(prompt)
@@ -204,6 +239,9 @@ func (c *Client) AskApproval(ctx context.Context, chatID string, req relay.Appro
 	}
 	edit, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 	defer cancel()
+	if !c.admits(edit, chatID) {
+		return approved, err
+	}
 	body := label + " — " + req.Tool
 	_, _ = c.api.Send(edit, chatID, "m.room.message", map[string]any{"msgtype": "m.notice", "body": "* " + body,
 		"m.new_content": mxapi.Notice(body), "m.relates_to": map[string]string{"rel_type": "m.replace", "event_id": prompt}})

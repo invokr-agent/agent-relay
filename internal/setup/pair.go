@@ -169,6 +169,9 @@ func pairMatrix(ctx context.Context, m *config.Matrix, dir string, emit func(Eve
 	if err != nil {
 		return err
 	}
+	if err := mxapi.CheckHomeserver(m.Homeserver); err != nil {
+		return err
+	}
 	api := mxapi.API{HC: matrixAPI, Homeserver: m.Homeserver, AccessToken: token}
 	s, err := api.Sync(ctx, "", 0)
 	if err != nil {
@@ -201,18 +204,21 @@ func pairMatrix(ctx context.Context, m *config.Matrix, dir string, emit func(Eve
 }
 
 // matrixCode finds a message, sent since issued (ms) in a two-member room,
-// equal to code, counting each sender's attempts and ignoring those past
-// maxAttempts.
+// equal to code, counting each sender's attempts; it leaves the room of a
+// failed attempt or one past maxAttempts.
 func matrixCode(ctx context.Context, api mxapi.API, s mxapi.Sync, self, code string, issued int64, attempts map[string]int) (room, sender string) {
 	for room, j := range s.Rooms.Join {
 		for _, e := range j.Timeline.Events {
-			if !e.Text() || e.Sender == self || e.TS < issued || attempts[e.Sender] >= maxAttempts {
+			if !e.Text() || e.Sender == self || e.TS < issued {
 				continue
 			}
-			attempts[e.Sender]++
-			if direct, _ := api.Direct(ctx, room); direct && sameCode(e.Content.Body, code) {
-				return room, e.Sender
+			if attempts[e.Sender]++; attempts[e.Sender] <= maxAttempts {
+				if direct, _ := api.Direct(ctx, room); direct && sameCode(e.Content.Body, code) {
+					return room, e.Sender
+				}
 			}
+			_ = api.Leave(ctx, room)
+			break
 		}
 	}
 	return "", ""

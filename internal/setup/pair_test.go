@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"sync"
 	"testing"
@@ -13,6 +14,7 @@ import (
 	"github.com/zalando/go-keyring"
 
 	"github.com/invokr-agent/agent-relay/internal/config"
+	"github.com/invokr-agent/agent-relay/internal/mxapi"
 	"github.com/invokr-agent/agent-relay/internal/secrets"
 	"github.com/invokr-agent/agent-relay/internal/tgapi"
 )
@@ -176,5 +178,29 @@ func TestPairSignalFailures(t *testing.T) {
 		if uri, err := signalPairing(t, tc[0], tc[1]); err == nil || (tc[1] != "" && uri != "") {
 			t.Errorf("%s: paired (uri %q)", name, uri)
 		}
+	}
+}
+
+func TestMatrixCodeLeavesRoomOfFailedAttempt(t *testing.T) {
+	var mu sync.Mutex
+	var left []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/leave") {
+			mu.Lock()
+			left = append(left, r.URL.EscapedPath())
+			mu.Unlock()
+		}
+		_, _ = w.Write([]byte(`{"chunk":[{"content":{"membership":"join"}},{"content":{"membership":"join"}}]}`))
+	}))
+	defer srv.Close()
+	var s mxapi.Sync
+	if err := json.Unmarshal([]byte(`{"rooms":{"join":{"!r":{"timeline":{"events":[
+		{"type":"m.room.message","sender":"@eve:hs","origin_server_ts":2,"content":{"msgtype":"m.text","body":"WRONG"}},
+		{"type":"m.room.message","sender":"@eve:hs","origin_server_ts":2,"content":{"msgtype":"m.text","body":"ABCD2345"}}]}}}}}`), &s); err != nil {
+		t.Fatal(err)
+	}
+	room, _ := matrixCode(context.Background(), mxapi.API{HC: srv.Client(), Homeserver: srv.URL}, s, "@bot:hs", "ABCD2345", 1, map[string]int{})
+	if room != "" || len(left) != 1 || left[0] != "/_matrix/client/v3/rooms/%21r/leave" {
+		t.Fatalf("room %q, left %v", room, left)
 	}
 }

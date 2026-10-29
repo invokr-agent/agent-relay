@@ -36,6 +36,23 @@ type API struct {
 
 var txn atomic.Int64
 
+const (
+	maxBody      = 32 << 20
+	maxErrorBody = 64 << 10
+)
+
+// CheckHomeserver accepts https URLs, and http ones only on localhost.
+func CheckHomeserver(homeserver string) error {
+	u, err := url.Parse(homeserver)
+	if err != nil || u.Host == "" {
+		return errors.New("matrix: homeserver must be a URL")
+	}
+	if host := u.Hostname(); u.Scheme == "https" || u.Scheme == "http" && (host == "localhost" || host == "127.0.0.1" || host == "::1") {
+		return nil
+	}
+	return errors.New("matrix: homeserver must be https://, or http:// on localhost")
+}
+
 // Do sends body as JSON to path under /_matrix/client/v3 and decodes the
 // reply into result, if non-nil.
 func (a API) Do(ctx context.Context, method, path string, body, result any) error {
@@ -62,13 +79,13 @@ func (a API) Do(ctx context.Context, method, path string, body, result any) erro
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
 		e := &APIError{Status: resp.StatusCode}
-		_ = json.NewDecoder(resp.Body).Decode(e)
+		_ = json.NewDecoder(io.LimitReader(resp.Body, maxErrorBody)).Decode(e)
 		return e
 	}
 	if result == nil {
 		return nil
 	}
-	return json.NewDecoder(resp.Body).Decode(result)
+	return json.NewDecoder(io.LimitReader(resp.Body, maxBody)).Decode(result)
 }
 
 // WhoAmI returns the user ID the access token belongs to.
@@ -108,19 +125,31 @@ func (a API) Leave(ctx context.Context, room string) error {
 	return a.Do(ctx, http.MethodPost, "/rooms/"+url.PathEscape(room)+"/leave", map[string]any{}, nil)
 }
 
-// Direct reports whether room has at most two joined members.
+// Direct reports whether room has at most two joined or invited members.
 func (a API) Direct(ctx context.Context, room string) (bool, error) {
 	var m struct {
-		Joined map[string]json.RawMessage `json:"joined"`
+		Chunk []Event `json:"chunk"`
 	}
-	err := a.Do(ctx, http.MethodGet, "/rooms/"+url.PathEscape(room)+"/joined_members", nil, &m)
-	return err == nil && len(m.Joined) <= 2, err
+	err := a.Do(ctx, http.MethodGet, "/rooms/"+url.PathEscape(room)+"/members", nil, &m)
+	n := 0
+	for _, e := range m.Chunk {
+		if e.Content.Membership == "join" || e.Content.Membership == "invite" {
+			n++
+		}
+	}
+	return err == nil && n <= 2, err
 }
 
 // Unauthorized reports a missing, unknown or revoked access token.
 func Unauthorized(err error) bool {
 	e, ok := errors.AsType[*APIError](err)
 	return ok && e.Status == http.StatusUnauthorized
+}
+
+// Rejected reports a request refused for good: a 4xx other than 401 and 429.
+func Rejected(err error) bool {
+	e, ok := errors.AsType[*APIError](err)
+	return ok && e.Status/100 == 4 && e.Status != http.StatusUnauthorized && e.Status != http.StatusTooManyRequests
 }
 
 // Sync and the types below are the parts of a /sync reply the relay reads.
