@@ -229,7 +229,7 @@ func TestAskApproval_Approve(t *testing.T) {
 	}()
 
 	approved, err := c.AskApproval(ctx, "111", relay.ApprovalRequest{Approver: "7",
-		ID: "req-1", Tool: "shell", Summary: "ls /tmp",
+		ID: "req-1", Tool: "shell", Kind: "ls /tmp",
 	})
 	if err != nil {
 		t.Fatalf("AskApproval: %v", err)
@@ -252,7 +252,7 @@ func TestAskApproval_Deny(t *testing.T) {
 	}()
 
 	approved, err := c.AskApproval(ctx, "111", relay.ApprovalRequest{Approver: "7",
-		ID: "req-2", Tool: "shell", Summary: "ls /tmp",
+		ID: "req-2", Tool: "shell", Kind: "ls /tmp",
 	})
 	if err != nil {
 		t.Fatalf("AskApproval: %v", err)

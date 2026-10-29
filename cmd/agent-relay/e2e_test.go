@@ -184,12 +184,15 @@ func TestEndToEndTelegram(t *testing.T) {
 	if _, ok := fake.WaitText(10*time.Second, "echo: hello"); !ok {
 		t.Fatalf("no reply; sent %v\n%s", fake.Sent(), r.output.String())
 	}
+	if out := r.output.String(); !strings.Contains(out, "telegram_bot=@fakebot telegram_users=2") {
+		t.Fatalf("no startup line:\n%s", out)
+	}
 	fake.UserSays(7, 7, "run")
 	ask, ok := fake.Wait(10*time.Second, func(m telegramtest.Message) bool { return len(m.Buttons) == 2 })
 	if !ok {
 		t.Fatalf("no approval prompt; sent %v", fake.Sent())
 	}
-	if ask.Text != "🔧 make\nexecute" {
+	if ask.Text != "🔧 make" {
 		t.Fatalf("approval prompt: %q", ask.Text)
 	}
 	fake.UserClicks(8, 7, ask.MessageID, ask.Buttons[0])

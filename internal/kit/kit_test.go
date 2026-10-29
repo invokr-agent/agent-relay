@@ -21,8 +21,8 @@ func TestApprovalPromptText(t *testing.T) {
 	if got := ApprovalPromptText(relay.ApprovalRequest{Tool: "make"}); got != "🔧 make" {
 		t.Fatalf("bare: %q", got)
 	}
-	got := ApprovalPromptText(relay.ApprovalRequest{Tool: "make", Summary: "execute", Details: strings.Repeat("é", 1<<10+1)})
-	if want := "🔧 make\nexecute\n\n" + strings.Repeat("é", 1<<10); got != want {
+	got := ApprovalPromptText(relay.ApprovalRequest{Tool: "make", Kind: "execute", Details: strings.Repeat("é", 1<<10+1)})
+	if want := "🔧 make\n\n" + strings.Repeat("é", 1<<10); got != want {
 		t.Fatalf("full: %q", got)
 	}
 }

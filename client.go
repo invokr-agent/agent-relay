@@ -37,7 +37,7 @@ type Typer interface {
 
 // ApprovalRequest carries the fields needed for a user-facing approval prompt.
 type ApprovalRequest struct {
-	ID, Tool, Summary, Details string
+	ID, Tool, Kind, Details string
 	// Approver is the SenderID of the user who started the turn; clients
 	// accept an answer from that user only.
 	Approver string

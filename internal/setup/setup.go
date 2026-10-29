@@ -49,7 +49,7 @@ var agentField = Field{Key: "agent", Label: "Agent command", Type: "list", Help:
 var descriptors = []Descriptor{
 	{Client: "telegram", Pairing: "code", Notice: "Telegram is not end-to-end encrypted; prefer Signal for sensitive work.",
 		Fields: []Field{
-			{Key: "token", Label: "Bot token", Help: "from @BotFather", Secret: true, Required: true, Pattern: `^[0-9]+:[A-Za-z0-9_-]{30,}$`},
+			{Key: "token", Label: "Bot token", Help: "from @BotFather, like 123456:ABC…", Secret: true, Required: true, Pattern: `^[0-9]+:[A-Za-z0-9_-]{30,}$`},
 			{Key: "allowed_user_ids", Label: "Allowed user IDs", Help: "comma-separated; replaces the list; or pair later", Pattern: `^[0-9, ]*$`},
 			agentField,
 		}},

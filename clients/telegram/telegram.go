@@ -54,6 +54,12 @@ func New(token string, allowedUserIDs []int64, allowGroups bool, baseURL string)
 
 func (c *Client) Name() string { return "telegram" }
 
+func (c *Client) Username(ctx context.Context) (string, error) {
+	var me tgapi.User
+	err := c.call(ctx, "getMe", map[string]any{}, &me)
+	return me.Username, err
+}
+
 // Listen starts the long-poll loop. Closes the channel when ctx is cancelled
 // or a fatal error occurs (e.g. 401 Unauthorized).
 func (c *Client) Listen(ctx context.Context) (<-chan relay.Inbound, error) {

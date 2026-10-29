@@ -293,7 +293,7 @@ func TestAskApproval_YES(t *testing.T) {
 	}()
 
 	approved, err := c.AskApproval(ctx, "+1test", relay.ApprovalRequest{
-		ID: "req-yes", Tool: "shell", Summary: "test",
+		ID: "req-yes", Tool: "shell", Kind: "test",
 	})
 	if err != nil {
 		t.Fatalf("AskApproval: %v", err)
@@ -321,7 +321,7 @@ func TestAskApproval_RegistersBeforeSendingPrompt(t *testing.T) {
 	}()
 
 	approved, err := c.AskApproval(ctx, "+1test", relay.ApprovalRequest{
-		ID: "req-fast", Tool: "shell", Summary: "test",
+		ID: "req-fast", Tool: "shell", Kind: "test",
 	})
 	if err != nil {
 		t.Fatalf("AskApproval: %v", err)
@@ -382,7 +382,7 @@ func TestAskApproval_NO(t *testing.T) {
 	}()
 
 	approved, err := c.AskApproval(ctx, "+1test", relay.ApprovalRequest{
-		ID: "req-no", Tool: "shell", Summary: "test",
+		ID: "req-no", Tool: "shell", Kind: "test",
 	})
 	if err != nil {
 		t.Fatalf("AskApproval: %v", err)

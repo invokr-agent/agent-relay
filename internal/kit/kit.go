@@ -16,9 +16,6 @@ import (
 // appends whatever reply instructions its own channel needs.
 func ApprovalPromptText(req relay.ApprovalRequest) string {
 	s := "🔧 " + req.Tool
-	if req.Summary != "" {
-		s += "\n" + req.Summary
-	}
 	if req.Details != "" {
 		s += "\n\n" + ChunkMessage(req.Details, 1<<10)[0]
 	}
