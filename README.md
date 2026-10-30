@@ -31,13 +31,16 @@ agent-relay setup --apply telegram <answers.json
 ## Run
 
 ```
-go install github.com/invokr-agent/agent-relay/cmd/agent-relay@latest
+curl -fsSL https://raw.githubusercontent.com/invokr-agent/agent-relay/main/install.sh | sh
+# or: go install github.com/invokr-agent/agent-relay/cmd/agent-relay@latest
 agent-relay                        # reads $XDG_CONFIG_HOME/agent-relay/config.json
 agent-relay -config /path/to/config.json
 agent-relay -version               # prints the version and exits
 ```
 
-`-config` defaults to `$XDG_CONFIG_HOME/agent-relay/config.json` (an explicit path is used as given). `-version` prints the version built into the binary — goreleaser stamps the release tag, a checkout of the source prints `dev` — and exits 0 without reading the config or starting any client. Both flags are parsed only for the plain run form; `setup` and `service` take their own arguments.
+`-config` defaults to `$XDG_CONFIG_HOME/agent-relay/config.json` (an explicit path is used as given). `-version` prints the version built into the binary — goreleaser stamps the release tag, a checkout of the source prints `dev` — and exits 0 without reading the config or starting any client. Both flags are parsed only for the plain run form; `setup`, `service` and `update` take their own arguments.
+
+`agent-relay update [version]` downloads a release (the newest, or e.g. `0.2.0`), checks it against the release's `checksums.txt`, and atomically replaces the running binary; a `dev` build refuses. If the relay runs as a service, it is then restarted onto the new build. `install.sh` does the same first install: it puts the binary in `~/.local/bin` (`AGENT_RELAY_INSTALL_DIR`, `AGENT_RELAY_INSTALL_VERSION` override).
 
 ```json
 {

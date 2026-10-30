@@ -35,6 +35,8 @@ type Bridge struct {
 	RateLimit int
 	Audit     *slog.Logger
 	Version   string // reported to the agent as ClientInfo
+	// Notice, when it returns non-empty, is appended once to each chat's next reply.
+	Notice func() string
 
 	conn      *acp.ClientConn
 	canLoad   bool
@@ -55,6 +57,7 @@ type chat struct {
 	mu       sync.Mutex
 	reply    strings.Builder
 	loading  bool // a session/load replay is running: its updates are history, not news
+	noticed  bool // Notice was appended to a reply; serve's goroutine only
 }
 
 func (c *chat) current() acp.SessionID {
@@ -283,6 +286,12 @@ func (b *Bridge) sendReply(ctx context.Context, c *chat, stop acp.StopReason) er
 	}
 	if reply == "" {
 		return nil
+	}
+	if b.Notice != nil && !c.noticed {
+		if note := b.Notice(); note != "" {
+			reply += "\n\n" + note
+			c.noticed = true
+		}
 	}
 	return c.t.Send(ctx, c.id, reply)
 }

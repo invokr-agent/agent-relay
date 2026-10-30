@@ -48,8 +48,25 @@ func TestSystemdInstallUninstall(t *testing.T) {
 	if got := strings.Join(*calls, "|"); got != want {
 		t.Fatalf("calls = %s", got)
 	}
-	if systemd("restart", path, content) == nil || launchd("restart", path, content) == nil {
+	if systemd("reload", path, content) == nil || launchd("reload", path, content) == nil {
 		t.Fatal("unknown action accepted")
+	}
+}
+
+func TestRestartOnlyTouchesAnInstalledService(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "agent-relay.service")
+	calls := recordCmds(t, "")
+	if err := systemd("restart", path, ""); err != nil || launchd("restart", path, "") != nil || len(*calls) != 0 {
+		t.Fatalf("restart without a service: err = %v, calls = %v", err, *calls)
+	}
+	if err := os.WriteFile(path, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := systemd("restart", path, ""); err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(*calls, "|"); got != "systemctl --user try-restart agent-relay.service" {
+		t.Fatalf("calls = %s", got)
 	}
 }
 

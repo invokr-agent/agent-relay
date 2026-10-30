@@ -167,6 +167,21 @@ func TestBridgeChatTurn(t *testing.T) {
 	}
 }
 
+func TestBridgeNoticeOncePerChat(t *testing.T) {
+	chat := newFakeClient(true)
+	startBridge(t, filepath.Join(t.TempDir(), "sessions.json"), chat, func(b *Bridge) {
+		b.Notice = func() string { return "update available" }
+	})
+	chat.say("hi")
+	if got := chat.next(t); got != "echo: hi (s1)\n\nupdate available" {
+		t.Fatalf("first reply = %q", got)
+	}
+	chat.say("again")
+	if got := chat.next(t); got != "echo: again (s1)" {
+		t.Fatalf("second reply = %q", got)
+	}
+}
+
 func TestBridgeApprovals(t *testing.T) {
 	for approve, want := range map[bool]string{true: "echo: ran (s1)", false: "echo: skipped (s1)"} {
 		chat := newFakeClient(approve)
