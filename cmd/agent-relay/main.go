@@ -3,6 +3,7 @@
 //	agent-relay [-config path]
 //	agent-relay setup [--describe [client] | --apply client | --pair client | client]
 //	agent-relay service [-config path] install|uninstall|status
+//	agent-relay update [version]
 //
 // The config (default $XDG_CONFIG_HOME/agent-relay/config.json) names the
 // agent argv to spawn and the clients to serve:
@@ -46,13 +47,15 @@ import (
 var version = "dev"
 
 func main() {
-	if len(os.Args) > 1 && (os.Args[1] == "setup" || os.Args[1] == "service") {
+	if len(os.Args) > 1 && (os.Args[1] == "setup" || os.Args[1] == "service" || os.Args[1] == "update") {
 		var err error
 		switch os.Args[1] {
 		case "setup":
 			err = runSetup(os.Args[2:], os.Stdin, os.Stdout)
 		case "service":
 			err = runService(os.Args[2:])
+		case "update":
+			err = runUpdate(os.Args[2:], os.Stdout)
 		}
 		if err != nil {
 			if !errors.As(err, new(reported)) {

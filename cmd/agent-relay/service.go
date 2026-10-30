@@ -34,7 +34,7 @@ func runService(args []string) error {
 		return err
 	}
 	if fs.NArg() != 1 {
-		return errors.New("usage: agent-relay service [-config path] install|uninstall|status")
+		return errors.New("usage: agent-relay service [-config path] install|uninstall|status|restart")
 	}
 	if os.Geteuid() == 0 {
 		return errors.New("service: run as your user, not root")
@@ -113,6 +113,15 @@ func plist(exe, cfg, log string) string {
 `, launchdLabel, e(exe), e(cfg), e(os.Getenv("PATH")), e(log), e(log))
 }
 
+// ifInstalled runs restart only when the service file exists, so updating a
+// relay that runs without a service is not an error.
+func ifInstalled(path string, restart func() error) error {
+	if _, err := os.Stat(path); err != nil {
+		return nil
+	}
+	return restart()
+}
+
 func systemd(action, path, content string) error {
 	sc := func(args ...string) error { return runCmd("systemctl", append([]string{"--user"}, args...)...) }
 	switch action {
@@ -140,6 +149,8 @@ func systemd(action, path, content string) error {
 		return sc("daemon-reload")
 	case "status":
 		return sc("status", "--no-pager", "agent-relay.service")
+	case "restart":
+		return ifInstalled(path, func() error { return sc("try-restart", "agent-relay.service") })
 	}
 	return fmt.Errorf("service: unknown action %q", action)
 }
@@ -165,6 +176,8 @@ func launchd(action, path, content string) error {
 		return nil
 	case "status":
 		return runCmd("launchctl", "print", target)
+	case "restart":
+		return ifInstalled(path, func() error { return runCmd("launchctl", "kickstart", "-k", target) })
 	}
 	return fmt.Errorf("service: unknown action %q", action)
 }
