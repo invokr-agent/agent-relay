@@ -19,20 +19,21 @@ import (
 )
 
 const (
-	detachedEnv  = "AGENT_RELAY_DETACHED"
+	modeEnv      = "AGENT_RELAY_MODE" // set by start and by the service unit; agentEnv keeps it from the agent
 	startWait    = 5 * time.Second
+	settleWait   = time.Second
 	stopWait     = 10 * time.Second
 	logCap       = 10 << 20
 	logTailLines = 20
 )
 
-// runMode is how this process was started, as recorded in the lock.
+// runMode is how this process was started, as recorded in the lock. Only an
+// explicit marker counts: terminals often carry INVOCATION_ID or
+// XPC_SERVICE_NAME, so sniffing those mislabels a foreground relay.
 func runMode() string {
-	switch {
-	case os.Getenv(detachedEnv) != "":
-		return "detached"
-	case os.Getenv("INVOCATION_ID") != "" || os.Getenv("XPC_SERVICE_NAME") != "":
-		return "service"
+	switch m := os.Getenv(modeEnv); m {
+	case "detached", "service":
+		return m
 	}
 	return "foreground"
 }
@@ -84,7 +85,7 @@ func spawn(args []string, out io.Writer) error {
 	defer func() { _ = logFile.Close() }()
 	cmd := exec.Command(exe, args...)
 	cmd.Stdout, cmd.Stderr = logFile, logFile
-	cmd.Env = append(os.Environ(), detachedEnv+"=1")
+	cmd.Env = append(os.Environ(), modeEnv+"=detached")
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
 	if err := cmd.Start(); err != nil {
 		return err
@@ -111,6 +112,12 @@ func awaitStart(cmd *exec.Cmd, out io.Writer) error {
 	deadline := time.After(startWait)
 	for {
 		if info, ok, _ := instance.Running(); ok && info.PID == cmd.Process.Pid {
+			// The lock comes before the clients connect: give a bad token a moment to fail here.
+			select {
+			case err := <-exited:
+				return fmt.Errorf("agent-relay exited during startup (%v); last log lines:\n%s", err, tail(logPath(), logTailLines))
+			case <-time.After(settleWait):
+			}
 			_, _ = fmt.Fprintf(out, "agent-relay started (pid %d) for %s; logs: %s\n", info.PID, info.Cwd, logPath())
 			return nil
 		}
@@ -127,11 +134,12 @@ func awaitStart(cmd *exec.Cmd, out io.Writer) error {
 // runStop serves `agent-relay stop`, whichever way the relay was started.
 func runStop(out io.Writer) error {
 	info, ok, err := instance.Running()
-	if err != nil || !ok {
-		if err == nil {
-			_, _ = fmt.Fprintln(out, "agent-relay is not running")
-		}
+	if err != nil {
 		return err
+	}
+	if !ok {
+		_, _ = fmt.Fprintln(out, "agent-relay is not running")
+		return nil
 	}
 	return stopRelay(info, out)
 }
@@ -145,10 +153,15 @@ func stopRelay(info instance.Info, out io.Writer) error {
 	}
 	_ = syscall.Kill(info.PID, syscall.SIGTERM)
 	if !waitStopped(stopWait) {
-		// A detached relay leads its own process group: take its agent down with it.
-		if syscall.Kill(-info.PID, syscall.SIGKILL) != nil {
-			_ = syscall.Kill(info.PID, syscall.SIGKILL)
+		// Only kill what still holds the lock, so a reused pid is left alone.
+		if now, ok, _ := instance.Running(); !ok || now.PID != info.PID {
+			return nil
 		}
+		target := info.PID
+		if info.Mode == "detached" {
+			target = -info.PID // it leads its own process group: take its agent down too
+		}
+		_ = syscall.Kill(target, syscall.SIGKILL)
 		if !waitStopped(time.Second) {
 			return fmt.Errorf("agent-relay (pid %d) did not stop", info.PID)
 		}

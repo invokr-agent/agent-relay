@@ -2,15 +2,14 @@ package instance
 
 import (
 	"errors"
-	"path/filepath"
+	"os"
+	"syscall"
 	"testing"
+	"time"
 )
 
 func TestOneHolderAtATime(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "relay.lock")
-	orig := lockPath
-	lockPath = func() string { return path }
-	t.Cleanup(func() { lockPath = orig })
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
 
 	if _, ok, err := Running(); ok || err != nil {
 		t.Fatalf("Running before any lock = %v, %v", ok, err)
@@ -35,4 +34,27 @@ func TestOneHolderAtATime(t *testing.T) {
 	} else {
 		release()
 	}
+}
+
+// A reader's shared lock must not make a starting relay think another runs.
+func TestAcquireWaitsOutAReader(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	release, err := Acquire(Info{PID: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	release()
+	f, err := os.Open(lockPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_SH); err != nil {
+		t.Fatal(err)
+	}
+	go func() { time.Sleep(100 * time.Millisecond); _ = f.Close() }()
+	release, err = Acquire(Info{PID: 2})
+	if err != nil {
+		t.Fatalf("Acquire during a reader: %v", err)
+	}
+	release()
 }

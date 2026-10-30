@@ -82,7 +82,7 @@ agent-relay status
 agent-relay stop
 ```
 
-`start` runs the relay in its own session, so closing the terminal does not stop it, and waits until it holds the lock; if it dies first, `start` prints the last log lines. Output goes to `relay.log` next to the lock (restarted past 10 MB). `-cwd` overrides the config's `cwd` for this run; `-replace` stops the running relay first (not a service: use `agent-relay service restart`). `stop` sends SIGTERM, then kills the relay's process group after 10 s; for the service it runs `systemctl --user stop` (or `launchctl bootout`), which leaves the service installed. `start` does not restart after a crash or survive a reboot; the service below does.
+`start` runs the relay in its own session, so closing the terminal does not stop it, and waits until it holds the lock and has run a second; if it dies first, `start` prints the last log lines. Output goes to `relay.log` next to the lock; `start` empties it first once it passes 10 MB, so a long-running relay can grow it beyond that. `-cwd` overrides the config's `cwd` for this run; `-replace` stops the running relay first (not a service: use `agent-relay service restart`). `stop` sends SIGTERM, then kills the relay's process group after 10 s; for the service it runs `systemctl --user stop` (or `launchctl bootout`), which leaves the service installed. `start` does not restart after a crash or survive a reboot; the service below does.
 
 ## Service
 

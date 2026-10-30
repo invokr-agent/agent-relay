@@ -38,8 +38,11 @@ func Dir() string {
 	return filepath.Join(base, "agent-relay")
 }
 
-// lockPath is a package var so tests use a temp dir.
-var lockPath = func() string { return filepath.Join(Dir(), "relay.lock") }
+func lockPath() string { return filepath.Join(Dir(), "relay.lock") }
+
+// busyWait covers a reader's brief shared lock and a holder's write of its
+// Info: both look like "running" for a moment without being another relay.
+const busyWait = 500 * time.Millisecond
 
 // Acquire takes the lock for info, or returns ErrRunning naming the holder.
 // release unlocks it; exiting does the same.
@@ -52,34 +55,46 @@ func Acquire(info Info) (release func(), err error) {
 	if err != nil {
 		return nil, err
 	}
-	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+	if err := lockExclusive(f); err != nil {
 		_ = f.Close()
 		if errors.Is(err, syscall.EWOULDBLOCK) {
-			held, _ := read(path)
+			held, err := read(path)
+			if err != nil {
+				return nil, errors.New("agent-relay lock is busy; try again")
+			}
 			return nil, ErrRunning{held}
 		}
 		return nil, err
 	}
 	data, _ := json.Marshal(info)
-	if err := writeAll(f, data); err != nil {
+	if err := f.Truncate(0); err != nil {
+		_ = f.Close()
+		return nil, err
+	}
+	if _, err := f.WriteAt(data, 0); err != nil {
 		_ = f.Close()
 		return nil, err
 	}
 	return func() { _ = f.Close() }, nil
 }
 
-func writeAll(f *os.File, data []byte) error {
-	if err := f.Truncate(0); err != nil {
-		return err
+// lockExclusive retries for busyWait, so a concurrent `status` cannot make a
+// starting relay give up.
+func lockExclusive(f *os.File) error {
+	deadline := time.Now().Add(busyWait)
+	for {
+		err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
+		if !errors.Is(err, syscall.EWOULDBLOCK) || time.Now().After(deadline) {
+			return err
+		}
+		time.Sleep(20 * time.Millisecond)
 	}
-	_, err := f.WriteAt(data, 0)
-	return err
 }
 
 // Running reports the relay holding the lock, if any.
 func Running() (Info, bool, error) {
 	path := lockPath()
-	f, err := os.Open(path)
+	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
 	if errors.Is(err, os.ErrNotExist) {
 		return Info{}, false, nil
 	}
@@ -96,11 +111,18 @@ func Running() (Info, bool, error) {
 	return info, err == nil, err
 }
 
+// read retries for busyWait, past a holder's truncate-then-write.
 func read(path string) (Info, error) {
-	var info Info
-	data, err := os.ReadFile(path)
-	if err == nil {
-		err = json.Unmarshal(data, &info)
+	deadline := time.Now().Add(busyWait)
+	for {
+		var info Info
+		data, err := os.ReadFile(path)
+		if err == nil {
+			err = json.Unmarshal(data, &info)
+		}
+		if err == nil || time.Now().After(deadline) {
+			return info, err
+		}
+		time.Sleep(20 * time.Millisecond)
 	}
-	return info, err
 }
