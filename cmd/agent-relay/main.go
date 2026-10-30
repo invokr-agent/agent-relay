@@ -123,6 +123,7 @@ func run(path string, logger *slog.Logger) error {
 	}
 	logger.Info("agent-relay starting", info...)
 	agent := exec.CommandContext(ctx, cfg.Agent[0], cfg.Agent[1:]...)
+	agent.Dir = cfg.Cwd
 	agent.Stderr = os.Stderr
 	agent.Env = agentEnv(os.Environ())
 	bridge := &relay.Bridge{Store: store, Clients: clients, Logger: logger, Cwd: cfg.Cwd, RateLimit: cfg.RateLimit, Version: version, Notice: notice, Audit: slog.New(slog.NewJSONHandler(audit, nil))}
