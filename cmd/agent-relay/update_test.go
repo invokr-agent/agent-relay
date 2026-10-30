@@ -52,9 +52,13 @@ func TestLogUpdateOnlyForNewerRelease(t *testing.T) {
 	for tag, want := range map[string]bool{"v0.3.0": true, "v0.2.0": false, "v0.1.0": false} {
 		latestTag = func(context.Context) (string, error) { return tag, nil }
 		var buf bytes.Buffer
+		updateNotice.Store("")
 		logUpdate(context.Background(), slog.New(slog.NewTextHandler(&buf, nil)))
 		if got := strings.Contains(buf.String(), "update available"); got != want {
 			t.Fatalf("latest %s: logged = %v, want %v", tag, got, want)
+		}
+		if got := strings.Contains(notice(), tag); got != want {
+			t.Fatalf("latest %s: notice = %q", tag, notice())
 		}
 	}
 }

@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"os"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"golang.org/x/mod/semver"
@@ -45,7 +46,15 @@ func runUpdate(args []string, out io.Writer) error {
 	return nil
 }
 
-// logUpdate logs when a newer release exists. Off for dev builds and with
+// updateNotice is the chat line for a newer release, "" until logUpdate finds one.
+var updateNotice atomic.Value
+
+func notice() string {
+	s, _ := updateNotice.Load().(string)
+	return s
+}
+
+// logUpdate logs when a newer release exists and sets the chat notice. Off for dev builds and with
 // AGENT_RELAY_NO_UPDATE_CHECK set; a failed lookup is silent.
 func logUpdate(ctx context.Context, logger *slog.Logger) {
 	if version == "dev" || os.Getenv("AGENT_RELAY_NO_UPDATE_CHECK") != "" {
@@ -56,5 +65,6 @@ func logUpdate(ctx context.Context, logger *slog.Logger) {
 	tag, err := latestTag(ctx)
 	if err == nil && semver.Compare(tag, "v"+strings.TrimPrefix(version, "v")) > 0 {
 		logger.Info("update available: run agent-relay update", "current", version, "latest", tag)
+		updateNotice.Store(fmt.Sprintf("ℹ️ agent-relay %s is available (running %s): run `agent-relay update`", tag, version))
 	}
 }

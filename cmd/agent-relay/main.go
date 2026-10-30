@@ -125,7 +125,7 @@ func run(path string, logger *slog.Logger) error {
 	agent := exec.CommandContext(ctx, cfg.Agent[0], cfg.Agent[1:]...)
 	agent.Stderr = os.Stderr
 	agent.Env = agentEnv(os.Environ())
-	bridge := &relay.Bridge{Store: store, Clients: clients, Logger: logger, Cwd: cfg.Cwd, RateLimit: cfg.RateLimit, Version: version, Audit: slog.New(slog.NewJSONHandler(audit, nil))}
+	bridge := &relay.Bridge{Store: store, Clients: clients, Logger: logger, Cwd: cfg.Cwd, RateLimit: cfg.RateLimit, Version: version, Notice: notice, Audit: slog.New(slog.NewJSONHandler(audit, nil))}
 	return bridge.Run(ctx, agent)
 }
 
