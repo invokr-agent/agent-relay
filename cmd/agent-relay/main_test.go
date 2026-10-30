@@ -16,6 +16,7 @@ func TestLoadMovesLegacyToken(t *testing.T) {
 	keyring.MockInit()
 	dir := t.TempDir()
 	t.Setenv("XDG_CONFIG_HOME", dir)
+	t.Setenv("XDG_STATE_HOME", dir)
 	path := filepath.Join(dir, "config.json")
 	if err := os.WriteFile(path, []byte(`{"agent":["a"],"telegram":{"token":"tok","allowed_chat_ids":[42]}}`), 0o600); err != nil {
 		t.Fatal(err)
@@ -38,6 +39,7 @@ func TestLoadMovesLegacyToken(t *testing.T) {
 
 func TestRunRefusesSymlinkedAuditLog(t *testing.T) {
 	dir := t.TempDir()
+	t.Setenv("XDG_STATE_HOME", dir)
 	path := filepath.Join(dir, "config.json")
 	target := filepath.Join(dir, "elsewhere")
 	if err := os.Symlink(target, filepath.Join(dir, "audit.log")); err != nil {
@@ -46,7 +48,7 @@ func TestRunRefusesSymlinkedAuditLog(t *testing.T) {
 	if err := os.WriteFile(path, []byte(`{"version":1,"agent":["true"]}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := run(path, nil); err == nil {
+	if err := run(path, "", nil); err == nil {
 		t.Fatal("run followed the audit symlink")
 	}
 	if _, err := os.Stat(target); !os.IsNotExist(err) {
