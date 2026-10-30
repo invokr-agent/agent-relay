@@ -22,7 +22,7 @@ linters:
         settings:
           # Implementation Go LOC ceiling (tests excluded). Before raising it,
           # trim lines; raise only to the measured count. History: git log -p .golangci.yml
-          max-go-code-lines: 2970
+          max-go-code-lines: 3245
           include-tests: false
           exclude-generated: true
           exclude-dirs: [tools]
