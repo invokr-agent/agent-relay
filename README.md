@@ -10,6 +10,15 @@ Chat with a coding agent from Telegram, Matrix or Signal. agent-relay is an [ACP
   - `/cancel` stops the running turn.
   - Other text, including the agent's own `/commands`, goes to the agent as the prompt.
 
+## Quickstart
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/invokr-agent/agent-relay/main/install.sh | sh
+agent-relay setup telegram     # or: matrix, signal; asks for the agent command, e.g. `invokr acp`
+agent-relay service install    # or run `agent-relay` in the foreground
+agent-relay update             # later: install the newest release
+```
+
 ## Setup
 
 ```
