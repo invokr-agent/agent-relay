@@ -80,6 +80,7 @@ func main() {
 }
 
 func run(path string, logger *slog.Logger) error {
+	go logUpdate(context.Background(), logger)
 	cfg, err := load(path)
 	if err != nil {
 		return err

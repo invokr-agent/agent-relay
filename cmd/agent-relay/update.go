@@ -5,8 +5,12 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"strings"
+	"time"
+
+	"golang.org/x/mod/semver"
 
 	"github.com/invokr-agent/agent-relay/internal/installer"
 )
@@ -14,6 +18,7 @@ import (
 // Package vars so tests drive the command without a network or a service manager.
 var (
 	runInstaller   = installer.Run
+	latestTag      = installer.LatestTag
 	restartService = func() error { return runService([]string{"restart"}) }
 )
 
@@ -38,4 +43,18 @@ func runUpdate(args []string, out io.Writer) error {
 		fmt.Fprintln(os.Stderr, "note: could not restart the agent-relay service; restart it yourself:", err)
 	}
 	return nil
+}
+
+// logUpdate logs when a newer release exists. Off for dev builds and with
+// AGENT_RELAY_NO_UPDATE_CHECK set; a failed lookup is silent.
+func logUpdate(ctx context.Context, logger *slog.Logger) {
+	if version == "dev" || os.Getenv("AGENT_RELAY_NO_UPDATE_CHECK") != "" {
+		return
+	}
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	tag, err := latestTag(ctx)
+	if err == nil && semver.Compare(tag, "v"+strings.TrimPrefix(version, "v")) > 0 {
+		logger.Info("update available: run agent-relay update", "current", version, "latest", tag)
+	}
 }

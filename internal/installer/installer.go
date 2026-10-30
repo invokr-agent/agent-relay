@@ -43,7 +43,7 @@ func Run(ctx context.Context, version string, out io.Writer) error {
 		return fmt.Errorf("no release builds for %s/%s", runtime.GOOS, runtime.GOARCH)
 	}
 	if version == "" {
-		if version, err = latestTag(ctx); err != nil {
+		if version, err = LatestTag(ctx); err != nil {
 			return err
 		}
 	}
@@ -86,7 +86,8 @@ func targetPath() (string, error) {
 	return exe, nil
 }
 
-func latestTag(ctx context.Context) (string, error) {
+// LatestTag is the newest release tag.
+func LatestTag(ctx context.Context) (string, error) {
 	body, err := get(ctx, apiBase+"/releases/latest")
 	if err != nil {
 		return "", err

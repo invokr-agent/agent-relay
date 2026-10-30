@@ -5,6 +5,7 @@ go 1.26.3
 require (
 	github.com/invokr-agent/acp v0.1.0
 	github.com/zalando/go-keyring v0.2.8
+	golang.org/x/mod v0.42.0
 	golang.org/x/sys v0.49.0
 	golang.org/x/term v0.47.0
 )
