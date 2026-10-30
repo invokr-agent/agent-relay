@@ -169,10 +169,16 @@ func TestApprovalByApproverReactionOnly(t *testing.T) {
 	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	edit, _ := h.bodies[len(h.bodies)-1]["m.new_content"].(map[string]any)
-	if edit["body"] != "❌ Denied — make" {
-		t.Fatalf("edit: %v", h.bodies[len(h.bodies)-1])
+	// The sync loop keeps polling, so the edit need not be the last request.
+	for _, b := range h.bodies {
+		if edit, _ := b["m.new_content"].(map[string]any); edit != nil {
+			if edit["body"] != "❌ Denied — make" {
+				t.Fatalf("edit: %v", b)
+			}
+			return
+		}
 	}
+	t.Fatal("no edit sent")
 }
 
 func TestNewRejectsPlainHTTPHomeserver(t *testing.T) {
