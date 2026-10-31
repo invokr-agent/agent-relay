@@ -238,7 +238,6 @@ func (b *Bridge) handle(ctx context.Context, c *chat, msg Inbound) error {
 	case "help":
 		return c.t.Send(ctx, c.id, b.relayHelp())
 	}
-	// The agent's own /help gets the relay's commands appended.
 	name, _, _ := command(text)
 	agentHelp := name == "help"
 	text = b.agentText(text)

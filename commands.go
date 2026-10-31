@@ -10,7 +10,6 @@ import (
 	"github.com/invokr-agent/acp"
 )
 
-// Command is one entry of a chat app's command menu.
 type Command struct{ Name, Description string }
 
 // CommandMenu is implemented by clients that show a command menu.
@@ -33,14 +32,12 @@ var relayCommands = []Command{
 
 var menuUnsafe = regexp.MustCompile(`[^a-z0-9_]+`)
 
-// menuName fits a command name to the strictest menu rules (Telegram's).
+// Telegram's rules, the strictest menu's.
 func menuName(name string) string {
 	s := menuUnsafe.ReplaceAllString(strings.ToLower(name), "_")
 	return s[:min(len(s), menuNameMax)]
 }
 
-// command splits "/name@bot rest" into its lowercase name and rest; ok is
-// false for text that is not a command.
 func command(text string) (name, rest string, ok bool) {
 	if !strings.HasPrefix(text, "/") {
 		return "", "", false
@@ -50,15 +47,13 @@ func command(text string) (name, rest string, ok bool) {
 	return strings.ToLower(head), rest, head != ""
 }
 
-// agentCommands holds the agent's advertised commands, shared by every chat:
-// an agent advertises the same set to each session.
+// Shared by every chat: an agent advertises the same set to each session.
 type agentCommands struct {
 	list    []acp.AvailableCommand
 	aliases map[string]string // menu name → agent name, where they differ
 	menu    []Command         // last menu pushed to clients
 }
 
-// agentHas reports whether the agent claims name, so a bare relay alias yields to it.
 func (b *Bridge) agentHas(name string) bool {
 	b.cmdMu.Lock()
 	defer b.cmdMu.Unlock()
@@ -70,8 +65,7 @@ func (b *Bridge) agentHas(name string) bool {
 	return false
 }
 
-// relayCommand resolves the relay command text names, if any: prefixed names
-// always, bare new/cancel/help unless the agent claims them.
+// Bare new/cancel/help yield to an agent command of the same name.
 func (b *Bridge) relayCommand(text string) string {
 	name, _, ok := command(strings.TrimSpace(text))
 	if !ok {
@@ -89,7 +83,7 @@ func (b *Bridge) relayCommand(text string) string {
 	return ""
 }
 
-// agentText maps a menu name back to the agent's own ("/skill_x" → "/skill:x").
+// "/skill_x" → "/skill:x"
 func (b *Bridge) agentText(text string) string {
 	name, rest, ok := command(text)
 	if !ok {
@@ -104,7 +98,6 @@ func (b *Bridge) agentText(text string) string {
 	return strings.TrimSpace("/" + orig + " " + rest)
 }
 
-// setAgentCommands records the agent's commands and refreshes every menu.
 func (b *Bridge) setAgentCommands(ctx context.Context, list []acp.AvailableCommand) {
 	// Held across the push so two lists never interleave their menu calls.
 	b.menuMu.Lock()
@@ -165,7 +158,6 @@ func describe(c acp.AvailableCommand) string {
 	return d
 }
 
-// relayHelpOnly lists the relay's own commands.
 func (b *Bridge) relayHelpOnly() string {
 	var s strings.Builder
 	s.WriteString("relay:")
@@ -175,7 +167,6 @@ func (b *Bridge) relayHelpOnly() string {
 	return s.String()
 }
 
-// relayHelp lists the relay's commands and the agent's, under their original names.
 func (b *Bridge) relayHelp() string {
 	var s strings.Builder
 	s.WriteString(b.relayHelpOnly() + "\n")
@@ -191,8 +182,7 @@ func (b *Bridge) relayHelp() string {
 	return strings.TrimSpace(s.String())
 }
 
-// probeCommands opens a throwaway session so the agent advertises its
-// commands before any chat writes; menus start with the relay's own.
+// A throwaway session gets the agent's commands before any chat writes.
 func (b *Bridge) probeCommands(ctx context.Context) {
 	if !b.hasMenu() {
 		return
