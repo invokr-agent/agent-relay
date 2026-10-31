@@ -15,7 +15,7 @@ Chat with a coding agent from Telegram, Matrix or Signal. agent-relay is an [ACP
 ```sh
 curl -fsSL https://raw.githubusercontent.com/invokr-agent/agent-relay/main/install.sh | sh
 agent-relay setup telegram     # or: matrix, signal; asks for the agent command, e.g. `invokr acp`
-agent-relay service install    # or run `agent-relay` in the foreground
+agent-relay start              # in the background; or `agent-relay` in the foreground
 agent-relay update             # later: install the newest release
 ```
 
@@ -71,6 +71,18 @@ agent-relay -version               # prints the version and exits
 - **Known limits:** ACP carries no turn id, so a late permission request from a finished prompt that arrives during the next prompt is attributed to the next prompt.
 - **Matrix:** a plain Client-Server API client for a bot account you register yourself (any homeserver; `http://` only on localhost). It reads unencrypted rooms only: end-to-end encryption is not supported, and an encrypted room gets a one-time notice and is otherwise ignored, so start the chat with encryption off (Element: create a room and disable encryption). Messages are therefore readable by the homeserver. Replies are `m.notice`s; the sync position is kept in `matrix_since` beside the config, and a first start skips the backlog.
 - **Signal:** needs [signal-cli](https://github.com/AsamK/signal-cli) in JSON-RPC mode on a Unix socket owned by the same user.
+
+## Background and single instance
+
+Only one relay runs per user: every relay (foreground, `start`, or the service) holds a lock at `$XDG_STATE_HOME/agent-relay/relay.lock` (default `~/.local/state/agent-relay/`), and a second one refuses to start, naming the running pid and workspace. The kernel releases the lock when the process dies, so a crash leaves nothing to clean up.
+
+```
+agent-relay start [-config path] [-cwd dir] [-replace]
+agent-relay status
+agent-relay stop
+```
+
+`start` runs the relay in its own session, so closing the terminal does not stop it, and waits until it holds the lock and has run a second; if it dies first, `start` prints the last log lines. Output goes to `relay.log` next to the lock; `start` empties it first once it passes 10 MB, so a long-running relay can grow it beyond that. `-cwd` overrides the config's `cwd` for this run; `-replace` stops the running relay first (not a service: use `agent-relay service restart`). `stop` sends SIGTERM, then kills the relay's process group after 10 s; for the service it runs `systemctl --user stop` (or `launchctl bootout`), which leaves the service installed. `start` does not restart after a crash or survive a reboot; the service below does.
 
 ## Service
 

@@ -85,6 +85,7 @@ Description=agent-relay chat bridge
 [Service]
 ExecStart=%s -config %s
 Environment=%s
+Environment=AGENT_RELAY_MODE=service
 Restart=on-failure
 RestartSec=5
 NoNewPrivileges=yes
@@ -103,7 +104,7 @@ func plist(exe, cfg, log string) string {
   <key>Label</key><string>%s</string>
   <key>ProgramArguments</key>
   <array><string>%s</string><string>-config</string><string>%s</string></array>
-  <key>EnvironmentVariables</key><dict><key>PATH</key><string>%s</string></dict>
+  <key>EnvironmentVariables</key><dict><key>PATH</key><string>%s</string><key>AGENT_RELAY_MODE</key><string>service</string></dict>
   <key>StandardOutPath</key><string>%s</string>
   <key>StandardErrorPath</key><string>%s</string>
   <key>RunAtLoad</key><true/>

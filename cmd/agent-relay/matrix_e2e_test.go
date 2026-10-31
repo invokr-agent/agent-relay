@@ -342,7 +342,7 @@ func TestEndToEndMatrix(t *testing.T) {
 		register(t, hs, "bob", "e2e-registration"), register(t, hs, "eve", "e2e-registration")
 
 	dir := t.TempDir()
-	r := &relayProc{t: t, path: filepath.Join(dir, "agent-relay", "config.json"), env: append(os.Environ(), mainEnv+"=1", "XDG_CONFIG_HOME="+dir)}
+	r := &relayProc{t: t, path: filepath.Join(dir, "agent-relay", "config.json"), env: append(os.Environ(), mainEnv+"=1", "XDG_CONFIG_HOME="+dir, "XDG_STATE_HOME="+dir)}
 	answers := map[string]any{"homeserver": hs, "user_id": bot.id, "access_token": "wrong", "agent": []string{os.Args[0], "e2e-agent"}}
 	if got := r.apply(answers); got["field"] != "access_token" {
 		t.Fatalf("bad token: %v", got)

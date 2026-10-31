@@ -4,6 +4,7 @@
 //	agent-relay setup [--describe [client] | --apply client | --pair client | client]
 //	agent-relay service [-config path] install|uninstall|status
 //	agent-relay update [version]
+//	agent-relay start [-config path] [-cwd dir] [-replace] | stop | status
 //
 // The config (default $XDG_CONFIG_HOME/agent-relay/config.json) names the
 // agent argv to spawn and the clients to serve:
@@ -22,6 +23,7 @@
 package main
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"flag"
@@ -34,12 +36,14 @@ import (
 	"slices"
 	"strings"
 	"syscall"
+	"time"
 
 	relay "github.com/invokr-agent/agent-relay"
 	"github.com/invokr-agent/agent-relay/clients/matrix"
 	signalcli "github.com/invokr-agent/agent-relay/clients/signal"
 	"github.com/invokr-agent/agent-relay/clients/telegram"
 	"github.com/invokr-agent/agent-relay/internal/config"
+	"github.com/invokr-agent/agent-relay/internal/instance"
 	"github.com/invokr-agent/agent-relay/internal/secrets"
 )
 
@@ -47,17 +51,8 @@ import (
 var version = "dev"
 
 func main() {
-	if len(os.Args) > 1 && (os.Args[1] == "setup" || os.Args[1] == "service" || os.Args[1] == "update") {
-		var err error
-		switch os.Args[1] {
-		case "setup":
-			err = runSetup(os.Args[2:], os.Stdin, os.Stdout)
-		case "service":
-			err = runService(os.Args[2:])
-		case "update":
-			err = runUpdate(os.Args[2:], os.Stdout)
-		}
-		if err != nil {
+	if len(os.Args) > 1 && !strings.HasPrefix(os.Args[1], "-") {
+		if err := runCommand(os.Args[1], os.Args[2:]); err != nil {
 			if !errors.As(err, new(reported)) {
 				fmt.Fprintln(os.Stderr, err)
 			}
@@ -66,6 +61,7 @@ func main() {
 		return
 	}
 	path := flag.String("config", config.Path(), "config file")
+	cwd := flag.String("cwd", "", "workspace the agent runs in (default: the config's cwd)")
 	showVersion := flag.Bool("version", false, "print the version and exit")
 	flag.Parse()
 	if *showVersion {
@@ -73,18 +69,39 @@ func main() {
 		return
 	}
 	logger := slog.New(slog.NewTextHandler(os.Stderr, nil))
-	if err := run(*path, logger); err != nil {
+	if err := run(*path, *cwd, logger); err != nil {
 		logger.Error("agent-relay stopped", "err", err)
 		os.Exit(1)
 	}
 }
 
-func run(path string, logger *slog.Logger) error {
+func runCommand(name string, args []string) error {
+	commands := map[string]func() error{
+		"setup":   func() error { return runSetup(args, os.Stdin, os.Stdout) },
+		"service": func() error { return runService(args) },
+		"update":  func() error { return runUpdate(args, os.Stdout) },
+		"start":   func() error { return runStart(args, os.Stdout) },
+		"stop":    func() error { return runStop(os.Stdout) },
+		"status":  func() error { return runStatus(os.Stdout) },
+	}
+	if cmd, ok := commands[name]; ok {
+		return cmd()
+	}
+	return fmt.Errorf("unknown command %q; run in the background with `agent-relay start`, in the foreground with no command", name)
+}
+
+func run(path, cwd string, logger *slog.Logger) error {
 	go logUpdate(context.Background(), logger)
 	cfg, err := load(path)
 	if err != nil {
 		return err
 	}
+	cfg.Cwd = cmp.Or(cwd, cfg.Cwd)
+	release, err := instance.Acquire(instance.Info{PID: os.Getpid(), Cwd: cfg.Cwd, Mode: runMode(), Started: time.Now()})
+	if err != nil {
+		return err
+	}
+	defer release()
 	clients, err := buildClients(cfg, filepath.Dir(path))
 	if err != nil {
 		return err
