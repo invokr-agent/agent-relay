@@ -47,8 +47,16 @@ func (a *fakeAgent) Authenticate(context.Context, acp.AuthenticateRequest) (acp.
 	return acp.AuthenticateResponse{}, nil
 }
 
-func (a *fakeAgent) NewSession(context.Context, acp.NewSessionRequest) (acp.NewSessionResponse, error) {
-	return acp.NewSessionResponse{SessionID: acp.SessionID(fmt.Sprint("s", a.sessions.Add(1)))}, nil
+func (a *fakeAgent) NewSession(ctx context.Context, _ acp.NewSessionRequest) (acp.NewSessionResponse, error) {
+	id := acp.SessionID(fmt.Sprint("s", a.sessions.Add(1)))
+	err := a.conn.SessionUpdate(ctx, acp.SessionNotification{SessionID: id, Update: acp.SessionUpdate{
+		AvailableCommandsUpdate: &acp.AvailableCommandsUpdate{AvailableCommands: fakeCommands}}})
+	return acp.NewSessionResponse{SessionID: id}, err
+}
+
+var fakeCommands = []acp.AvailableCommand{
+	{Name: "help", Description: "agent help"},
+	{Name: "skill:Foo-bar", Description: "a skill", Input: &acp.AvailableCommandInput{Hint: "task"}},
 }
 
 func (a *fakeAgent) Cancel(context.Context, acp.CancelNotification) error { return nil }

@@ -23,8 +23,9 @@ const (
 )
 
 var (
-	_ relay.Client = (*Client)(nil)
-	_ relay.Typer  = (*Client)(nil)
+	_ relay.Client      = (*Client)(nil)
+	_ relay.Typer       = (*Client)(nil)
+	_ relay.CommandMenu = (*Client)(nil)
 )
 
 // Client is a Telegram Bot API long-poll client.
@@ -53,6 +54,15 @@ func newWithBaseURL(token string, allowedUserIDs []int64, allowGroups bool, base
 }
 
 func (c *Client) Name() string { return "telegram" }
+
+// SetCommands also replaces a menu another program left on the same token.
+func (c *Client) SetCommands(ctx context.Context, cmds []relay.Command) error {
+	list := make([]map[string]string, len(cmds))
+	for i, cmd := range cmds {
+		list[i] = map[string]string{"command": cmd.Name, "description": cmd.Description}
+	}
+	return c.call(ctx, "setMyCommands", map[string]any{"commands": list}, nil)
+}
 
 func (c *Client) Username(ctx context.Context) (string, error) {
 	var me tgapi.User
