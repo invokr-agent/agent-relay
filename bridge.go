@@ -43,6 +43,10 @@ type Bridge struct {
 	chats     map[string]*chat // chat key → chat; Run's goroutine only
 	sessions  sync.Map         // acp.SessionID → *chat
 	approvals atomic.Int64
+	ctx       context.Context // Run's; outlives the agent's requests
+	cmdMu     sync.Mutex
+	menuMu    sync.Mutex
+	cmds      agentCommands
 }
 
 type chat struct {
@@ -88,6 +92,7 @@ func (b *Bridge) Run(ctx context.Context, agent *exec.Cmd) error {
 	if err := b.initialize(ctx, conn); err != nil {
 		return err
 	}
+	b.probeCommands(ctx)
 	inbound, stopped, err := b.listen(ctx)
 	if err != nil {
 		return err
@@ -110,7 +115,7 @@ func (b *Bridge) Run(ctx context.Context, agent *exec.Cmd) error {
 }
 
 func (b *Bridge) initialize(ctx context.Context, conn *acp.ClientConn) error {
-	b.conn, b.chats = conn, map[string]*chat{}
+	b.conn, b.chats, b.ctx = conn, map[string]*chat{}, ctx
 	init, err := conn.Initialize(ctx, acp.InitializeRequest{ProtocolVersion: acp.V1,
 		ClientInfo: &acp.Implementation{Name: "agent-relay", Version: b.Version}})
 	if err != nil {
@@ -167,7 +172,7 @@ func (b *Bridge) route(ctx context.Context, t Client, msg Inbound) {
 		go b.serve(ctx, c)
 	}
 	// /cancel cannot wait behind the turn it stops, nor behind the rate limit.
-	if strings.TrimSpace(msg.Text) == "/cancel" {
+	if b.relayCommand(msg.Text) == "cancel" {
 		var id acp.SessionID
 		c.set(func() {
 			if c.approver != "" {
@@ -224,12 +229,19 @@ func (b *Bridge) serve(ctx context.Context, c *chat) {
 
 func (b *Bridge) handle(ctx context.Context, c *chat, msg Inbound) error {
 	text := strings.TrimSpace(msg.Text)
-	if text == "/new" {
+	switch b.relayCommand(text) {
+	case "new":
 		if err := b.newSession(ctx, c); err != nil {
 			return err
 		}
 		return c.t.Send(ctx, c.id, "Started a new session.")
+	case "help":
+		return c.t.Send(ctx, c.id, b.relayHelp())
 	}
+	// The agent's own /help gets the relay's commands appended.
+	name, _, _ := command(text)
+	agentHelp := name == "help"
+	text = b.agentText(text)
 	if c.current() == "" {
 		if err := b.openSession(ctx, c); err != nil {
 			return err
@@ -245,6 +257,9 @@ func (b *Bridge) handle(ctx context.Context, c *chat, msg Inbound) error {
 	stop()
 	if err != nil {
 		return err
+	}
+	if agentHelp {
+		c.set(func() { c.reply.WriteString("\n\n" + b.relayHelpOnly()) })
 	}
 	return b.sendReply(ctx, c, resp.StopReason)
 }
@@ -306,6 +321,11 @@ var stopNotes = map[acp.StopReason]string{
 // SessionUpdate collects the agent's answer for the chat; the rest of the
 // stream (thoughts, tool calls, plans) stays out of the chat.
 func (b *Bridge) SessionUpdate(_ context.Context, n acp.SessionNotification) error {
+	if u := n.Update.AvailableCommandsUpdate; u != nil {
+		// Off the agent's read loop: menus call out to the chat apps.
+		go b.setAgentCommands(b.ctx, u.AvailableCommands)
+		return nil
+	}
 	v, ok := b.sessions.Load(n.SessionID)
 	chunk := n.Update.AgentMessageChunk
 	if !ok || chunk == nil || chunk.Content.Text == nil {

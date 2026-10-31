@@ -6,8 +6,9 @@ Chat with a coding agent from Telegram, Matrix or Signal. agent-relay is an [ACP
 - **Turns:** a chat's messages run one turn at a time. The streamed answer is posted as one message, split to the platform's size limit.
 - **Approvals:** permission requests become an approval prompt in the chat (buttons on Telegram, a 👍/👎 reaction or yes/no reply on Matrix, a reply on Signal). Yes picks the agent's allow-once option, no its reject-once option. Unanswered prompts are denied after 2 minutes.
 - **Commands:**
-  - `/new` starts a fresh session.
-  - `/cancel` stops the running turn.
+  - `/relay_new` starts a fresh session (`/new` too, unless the agent has its own `/new`).
+  - `/relay_cancel` stops the running turn (`/cancel` likewise).
+  - `/relay_help` lists the relay's commands and the ones the agent advertises. On Telegram the bot's command menu shows both.
   - Other text, including the agent's own `/commands`, goes to the agent as the prompt.
 
 ## Quickstart
