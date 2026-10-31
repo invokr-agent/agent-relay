@@ -258,7 +258,7 @@ func (b *Bridge) handle(ctx context.Context, c *chat, msg Inbound) error {
 	if err != nil {
 		return err
 	}
-	if agentHelp {
+	if agentHelp && resp.StopReason == acp.StopReasonEndTurn {
 		c.set(func() { c.reply.WriteString("\n\n" + b.relayHelpOnly()) })
 	}
 	return b.sendReply(ctx, c, resp.StopReason)

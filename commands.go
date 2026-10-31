@@ -106,7 +106,7 @@ func (b *Bridge) agentText(text string) string {
 
 // setAgentCommands records the agent's commands and refreshes every menu.
 func (b *Bridge) setAgentCommands(ctx context.Context, list []acp.AvailableCommand) {
-	// Held across the push so menus land in the order the agent sent them.
+	// Held across the push so two lists never interleave their menu calls.
 	b.menuMu.Lock()
 	defer b.menuMu.Unlock()
 	menu := slices.Clone(relayCommands)
@@ -125,9 +125,11 @@ func (b *Bridge) setAgentCommands(ctx context.Context, list []acp.AvailableComma
 		if name != c.Name {
 			aliases[name] = c.Name
 		}
-		if len(menu) < menuMax {
-			menu = append(menu, Command{name, describe(c)})
+		if len(menu) == menuMax {
+			b.Logger.Warn("agent command left out of the full menu; /relay_help lists it", "command", c.Name)
+			continue
 		}
+		menu = append(menu, Command{name, describe(c)})
 	}
 	b.cmdMu.Lock()
 	b.cmds.list, b.cmds.aliases = list, aliases
