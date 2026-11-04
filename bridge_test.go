@@ -36,7 +36,7 @@ func TestMain(m *testing.M) {
 		if sock := os.Getenv(fakeSocketEnv); sock != "" {
 			os.Exit(serveSocket(sock))
 		}
-		agent := &fakeAgent{conn: acp.NewAgentConn(os.Stdin, os.Stdout)}
+		agent := agentOn(acp.NewAgentConn(os.Stdin, os.Stdout))
 		agent.conn.Serve(context.Background(), agent)
 		<-agent.conn.Done()
 		os.Exit(0)
@@ -56,7 +56,7 @@ func serveSocket(path string) int {
 		if err != nil {
 			return 0
 		}
-		agent := &fakeAgent{conn: acp.NewAgentConn(c, c)}
+		agent := agentOn(acp.NewAgentConn(c, c))
 		go agent.conn.Serve(context.Background(), agent)
 	}
 }
@@ -64,11 +64,16 @@ func serveSocket(path string) int {
 type fakeAgent struct {
 	conn     *acp.AgentConn
 	sessions atomic.Int64
-	known    sync.Map // sessions this agent created; strict mode rejects the rest
+	known    sync.Map  // sessions this agent created; strict mode rejects the rest
+	loaded   chan bool // when set, LoadSession waits, then fails as a dying agent does
 }
 
+// agentOn makes a fake agent that speaks over conn, in this process.
+func agentOn(conn *acp.AgentConn) *fakeAgent { return &fakeAgent{conn: conn} }
+
 func (a *fakeAgent) Initialize(_ context.Context, req acp.InitializeRequest) (acp.InitializeResponse, error) {
-	return acp.InitializeResponse{ProtocolVersion: req.ProtocolVersion, AgentCapabilities: &acp.AgentCapabilities{LoadSession: true}}, nil
+	return acp.InitializeResponse{ProtocolVersion: req.ProtocolVersion,
+		AgentCapabilities: &acp.AgentCapabilities{LoadSession: true}}, nil
 }
 
 func (a *fakeAgent) Authenticate(context.Context, acp.AuthenticateRequest) (acp.AuthenticateResponse, error) {
@@ -94,6 +99,16 @@ func (a *fakeAgent) Cancel(context.Context, acp.CancelNotification) error { retu
 // mode stands for an agent that no longer knows the session it is asked to
 // load.
 func (a *fakeAgent) LoadSession(ctx context.Context, req acp.LoadSessionRequest) (acp.LoadSessionResponse, error) {
+	// A load that waits and then fails stands in for the agent the relay is
+	// replacing dying halfway through a turn: the test wants to see which agent
+	// the turn keeps talking to once the load comes back.
+	if a.loaded != nil {
+		// The rendezvous goes both ways: this tells the test the load is inside
+		// the agent, and waits for the test to say what the load does next.
+		a.loaded <- true
+		<-a.loaded
+		return acp.LoadSessionResponse{}, errors.New("agent went away mid-load")
+	}
 	_, known := a.known.Load(req.SessionID)
 	if os.Getenv(strictEnv) != "" && !known {
 		return acp.LoadSessionResponse{}, errors.New("unknown session")
@@ -479,6 +494,20 @@ func listened(path string) bool {
 	}
 }
 
+// waited waits up to 10 s for a condition, so a test can be sure the overlap
+// it wants really happened instead of sleeping a fixed amount and hoping.
+func waited(cond func() bool) bool {
+	for deadline := time.Now().Add(10 * time.Second); ; {
+		if cond() {
+			return true
+		}
+		if time.Now().After(deadline) {
+			return false
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
 // A spawned agent that exits still ends Run: only a transport the relay can
 // re-dial survives.
 func TestBridgeSpawnedAgentExitEndsRun(t *testing.T) {
@@ -554,5 +583,116 @@ func TestBridgeReconnectsAfterSocketAgentGoesAway(t *testing.T) {
 	case <-done:
 		t.Fatalf("Run returned: %v", runErr)
 	default:
+	}
+}
+
+// serveFakeAgents serves ACP on path from this process, one fake agent per
+// connection, calling setup with each agent and the number of the connection
+// it speaks over: that is how a test gates one agent's calls without touching
+// the next one's. The channel it returns carries a closer for every connection
+// the relay used, in order, so a test can make the relay lose an agent that
+// is still alive.
+func serveFakeAgents(t *testing.T, path string, setup func(*fakeAgent, int)) chan func() {
+	t.Helper()
+	l, err := net.Listen("unix", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = l.Close() })
+	used := make(chan func(), 8)
+	go func() {
+		for n := 1; ; n++ {
+			c, err := l.Accept()
+			if err != nil {
+				return
+			}
+			agent := agentOn(acp.NewAgentConn(c, c))
+			setup(agent, n)
+			go agent.conn.Serve(context.Background(), agent)
+			used <- func() { _ = c.Close() }
+		}
+	}()
+	return used
+}
+
+// A turn must not reach across a reconnect: it talks to the agent it started
+// on, so when that agent is replaced mid-turn the turn fails on its own agent
+// rather than opening a session on the replacement. The test holds a session
+// load inside agent 2 while Run re-dialls agent 3, which is the window where
+// Run's copy of the connection, its context and its load capability used to
+// be shared with the turn.
+func TestBridgeReconnectRacesATurn(t *testing.T) {
+	dir := t.TempDir()
+	sock := filepath.Join(dir, "agent.sock")
+	s, err := NewStore(filepath.Join(dir, "sessions.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	chat := newFakeClient(true)
+	b := &Bridge{Store: s, Clients: []Client{chat}, Logger: slog.New(slog.DiscardHandler), Cwd: dir}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	var dials atomic.Int32
+	var loaded = make(chan bool)        // agent 2's session load waits on the test
+	var made = make(chan *fakeAgent, 8) // each agent the relay reaches, in order
+	used := serveFakeAgents(t, sock, func(a *fakeAgent, n int) {
+		made <- a
+		if n == 2 { // the replacement agent, which the test loses mid-load
+			a.loaded = loaded
+		}
+	})
+	connect := Connector(func(ctx context.Context) (conn *acp.ClientConn, label string, err error) {
+		dials.Add(1)
+		c, derr := net.Dial("unix", sock)
+		if derr != nil {
+			return nil, "", derr // the socket stays up: the test closes the connection
+		}
+		b.Relayed = true
+		return acp.Connect(ctx, b, c, c), "socket " + sock, nil
+	})
+	done := make(chan struct{})
+	var runErr error
+	go func() { runErr = b.Run(ctx, connect); close(done) }()
+	defer func() { cancel(); <-done }()
+
+	chat.say("hi")
+	if got := chat.next(t); got != "echo: hi (s1)" {
+		t.Fatalf("the first agent replied %q", got)
+	}
+	// The chat's session is stored now, so its next turn loads it: that load
+	// is the call the test overlaps with a reconnect.
+	first := <-used
+	first() // the relay loses agent 1, though that process is still alive
+	if !waited(func() bool { return dials.Load() == 2 }) {
+		t.Fatalf("the bridge never re-dialled: %v", runErr)
+	}
+	chat.say("hi") // this turn loads the stored session on agent 2...
+	<-loaded       // ...and agent 2 reports the load is inside it
+	second := <-used
+	second() // ...then the test loses agent 2 while that load is still inside
+	if !waited(func() bool { return dials.Load() == 3 && len(made) == 3 }) {
+		t.Fatalf("the bridge never re-dialled a second time: %v", runErr)
+	}
+	loaded <- true // agent 2's load comes back now, failing as a dying agent's does
+	// The turn may not reach across to agent 3 for what agent 2 could not do:
+	// it fails on its own agent, and the chat reopens on agent 3 afterwards.
+	if got := chat.next(t); !strings.Contains(got, "turn failed") {
+		t.Fatalf("the straddling turn owed the chat %q, want its own failure", got)
+	}
+	chat.say("hi")
+	if got := chat.next(t); got != "echo: hi (s1)" {
+		t.Fatalf("the next turn: %q, want agent 3's answer", got)
+	}
+	var third *fakeAgent
+	for len(made) > 0 {
+		third = <-made
+	}
+	if sessions := third.sessions.Load(); sessions != 0 {
+		t.Fatalf("agent 3 made %d sessions, want none: the straddling turn must not reach it", sessions)
+	}
+	cancel()
+	<-done
+	if runErr != nil {
+		t.Fatalf("Run returned %v, want it to keep serving a relayed agent", runErr)
 	}
 }

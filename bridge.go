@@ -42,13 +42,11 @@ type Bridge struct {
 	// Relayed is set by Connect before it returns a socket connection: losing an
 	// agent the relay can re-dial is not fatal, unlike losing one it spawned.
 	Relayed   bool
-	conn      *acp.ClientConn
-	liveConn  *acp.ClientConn // the connection Run's defer closes; Run's goroutine only
-	canLoad   bool
-	chats     map[string]*chat // chat key → chat; Run's goroutine only
-	sessions  sync.Map         // acp.SessionID → *chat
+	liveConn  *acp.ClientConn         // the connection Run's defer closes; Run's goroutine only
+	reached   atomic.Pointer[Reached] // the agent connection currently live
+	chats     map[string]*chat        // chat key → chat; Run's goroutine only
+	sessions  sync.Map                // acp.SessionID → *chat
 	approvals atomic.Int64
-	ctx       context.Context // Run's; outlives the agent's requests
 	cmdMu     sync.Mutex
 	menuMu    sync.Mutex
 	cmds      agentCommands
@@ -86,6 +84,20 @@ func (c *chat) set(f func()) {
 // "spawned <argv0>"); Run logs the label and reconnects through the same
 // connector when a relayed agent goes away.
 type Connector func(ctx context.Context) (conn *acp.ClientConn, label string, err error)
+
+// Reached is the agent one turn talks to: its connection, the context Run
+// gave that connection, and whether it can load stored sessions. Run replaces
+// it wholesale when it re-dials, so a chat that snapshots it once speaks to
+// one agent for the whole turn, and never reads a field Run is writing.
+type Reached struct {
+	conn    *acp.ClientConn
+	ctx     context.Context
+	canLoad bool
+}
+
+// live is the currently reached agent, and nil until the first one answers:
+// every use snapshots it rather than sharing Run's copy.
+func (b *Bridge) live() *Reached { return b.reached.Load() }
 
 // Run reaches the agent through connect, then serves every client until ctx
 // ends. A relayed (socket) agent that goes away is reached again; a spawned
@@ -135,7 +147,7 @@ func (b *Bridge) reach(ctx context.Context, connect Connector) (*acp.ClientConn,
 	b.Logger.Info("agent reached", "transport", label)
 	// The command probe opens a throwaway session: on every connection, so
 	// a replacement agent's commands replace the ones the old agent had.
-	b.probeCommands(ctx)
+	b.probeCommands(ctx, conn)
 	return conn, label, nil
 }
 
@@ -204,7 +216,6 @@ func (b *Bridge) initialize(ctx context.Context, conn *acp.ClientConn) error {
 	if b.Logger == nil {
 		b.Logger = slog.Default()
 	}
-	b.conn, b.ctx = conn, ctx
 	if b.chats == nil {
 		b.chats = map[string]*chat{}
 	}
@@ -213,7 +224,11 @@ func (b *Bridge) initialize(ctx context.Context, conn *acp.ClientConn) error {
 	if err != nil {
 		return fmt.Errorf("messaging: initialize agent: %w", err)
 	}
-	b.canLoad = init.AgentCapabilities != nil && init.AgentCapabilities.LoadSession
+	// Published once the agent answered: a chat starting on this connection
+	// sees a reached agent, never a half-initialized one, and sees the whole
+	// replacement when Run swaps it for another agent.
+	b.reached.Store(&Reached{conn: conn, ctx: ctx,
+		canLoad: init.AgentCapabilities != nil && init.AgentCapabilities.LoadSession})
 	return nil
 }
 
@@ -279,8 +294,10 @@ func (b *Bridge) route(ctx context.Context, t Client, msg Inbound) {
 			notify(ctx, t, msg.ChatID, "Nothing to cancel.")
 			return
 		}
-		if err := b.conn.Cancel(ctx, acp.CancelNotification{SessionID: id}); err != nil {
-			b.Logger.Warn("cancel failed", "chat", key, "err", err)
+		if r := b.live(); r != nil {
+			if err := r.conn.Cancel(ctx, acp.CancelNotification{SessionID: id}); err != nil {
+				b.Logger.Warn("cancel failed", "chat", key, "err", err)
+			}
 		}
 		return
 	}
@@ -325,9 +342,15 @@ func (b *Bridge) serve(ctx context.Context, c *chat) {
 
 func (b *Bridge) handle(ctx context.Context, c *chat, msg Inbound) error {
 	text := strings.TrimSpace(msg.Text)
+	// One agent for the whole turn: Run may swap the connection underneath,
+	// so everything below talks to this snapshot.
+	reached := b.live()
+	if reached == nil {
+		return errors.New("messaging: no agent reached")
+	}
 	switch b.relayCommand(text) {
 	case "new":
-		if err := b.newSession(ctx, c); err != nil {
+		if err := b.newSession(ctx, c, reached); err != nil {
 			return err
 		}
 		return c.t.Send(ctx, c.id, "Started a new session.")
@@ -338,7 +361,7 @@ func (b *Bridge) handle(ctx context.Context, c *chat, msg Inbound) error {
 	agentHelp := name == "help"
 	text = b.agentText(text)
 	if c.current() == "" {
-		if err := b.openSession(ctx, c); err != nil {
+		if err := b.openSession(ctx, c, reached); err != nil {
 			return err
 		}
 	}
@@ -346,7 +369,7 @@ func (b *Bridge) handle(ctx context.Context, c *chat, msg Inbound) error {
 	c.set(c.reply.Reset)
 	stop := b.typing(ctx, c)
 	c.set(func() { c.approver, c.lost, c.turn = msg.SenderID, true, c.turn+1 })
-	resp, err := b.conn.Prompt(ctx, acp.PromptRequest{SessionID: c.current(),
+	resp, err := reached.conn.Prompt(ctx, acp.PromptRequest{SessionID: c.current(),
 		Prompt: []acp.ContentBlock{{Text: &acp.TextContent{Text: text}}}})
 	c.set(func() {
 		c.approver, c.turn = "", c.turn+1
@@ -364,24 +387,24 @@ func (b *Bridge) handle(ctx context.Context, c *chat, msg Inbound) error {
 	return b.sendReply(ctx, c, resp.StopReason)
 }
 
-func (b *Bridge) openSession(ctx context.Context, c *chat) error {
+func (b *Bridge) openSession(ctx context.Context, c *chat, reached *Reached) error {
 	stored := b.Store.SessionID(c.key)
-	if stored == "" || !b.canLoad {
-		return b.newSession(ctx, c)
+	if stored == "" || !reached.canLoad {
+		return b.newSession(ctx, c, reached)
 	}
 	c.set(func() { c.session, c.loading = acp.SessionID(stored), true })
 	b.sessions.Store(c.current(), c)
-	_, err := b.conn.LoadSession(ctx, acp.LoadSessionRequest{SessionID: c.current(), Cwd: b.Cwd, MCPServers: []acp.MCPServer{}})
+	_, err := reached.conn.LoadSession(ctx, acp.LoadSessionRequest{SessionID: c.current(), Cwd: b.Cwd, MCPServers: []acp.MCPServer{}})
 	c.set(func() { c.loading = false })
 	if err != nil {
 		b.Logger.Warn("stored session did not load; starting a new one", "chat", c.key, "err", err)
-		return b.newSession(ctx, c)
+		return b.newSession(ctx, c, reached)
 	}
 	return nil
 }
 
-func (b *Bridge) newSession(ctx context.Context, c *chat) error {
-	resp, err := b.conn.NewSession(ctx, acp.NewSessionRequest{Cwd: b.Cwd, MCPServers: []acp.MCPServer{}})
+func (b *Bridge) newSession(ctx context.Context, c *chat, reached *Reached) error {
+	resp, err := reached.conn.NewSession(ctx, acp.NewSessionRequest{Cwd: b.Cwd, MCPServers: []acp.MCPServer{}})
 	if err != nil {
 		return fmt.Errorf("new session: %w", err)
 	}
@@ -398,11 +421,15 @@ const reconnectNotice = "⚠️ the agent restarted mid-turn; this answer is los
 // noticeChats tells the chats whose answer is lost, before their turns are
 // dropped, so a chat whose answer arrived hears nothing new.
 func (b *Bridge) noticeChats() {
+	reached := b.live()
+	if reached == nil {
+		return
+	}
 	for _, c := range b.chats {
 		var lost bool
 		c.set(func() { lost = c.lost })
 		if lost {
-			notify(b.ctx, c.t, c.id, reconnectNotice)
+			notify(reached.ctx, c.t, c.id, reconnectNotice)
 		}
 	}
 }
@@ -452,7 +479,9 @@ var stopNotes = map[acp.StopReason]string{
 func (b *Bridge) SessionUpdate(_ context.Context, n acp.SessionNotification) error {
 	if u := n.Update.AvailableCommandsUpdate; u != nil {
 		// Off the agent's read loop: menus call out to the chat apps.
-		go b.setAgentCommands(b.ctx, u.AvailableCommands)
+		if reached := b.live(); reached != nil {
+			go b.setAgentCommands(reached.ctx, u.AvailableCommands)
+		}
 		return nil
 	}
 	v, ok := b.sessions.Load(n.SessionID)
