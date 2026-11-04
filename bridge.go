@@ -295,21 +295,7 @@ func (b *Bridge) route(ctx context.Context, t Client, msg Inbound) {
 	}
 	// /cancel cannot wait behind the turn it stops, nor behind the rate limit.
 	if b.relayCommand(msg.Text) == "cancel" {
-		var id acp.SessionID
-		c.set(func() {
-			if c.approver != "" {
-				id = c.session
-			}
-		})
-		if id == "" {
-			notify(ctx, t, msg.ChatID, "Nothing to cancel.")
-			return
-		}
-		if r := b.live(); r != nil {
-			if err := r.conn.Cancel(ctx, acp.CancelNotification{SessionID: id}); err != nil {
-				b.Logger.Warn("cancel failed", "chat", key, "err", err)
-			}
-		}
+		b.cancel(ctx, c)
 		return
 	}
 	if !b.admit(c) {
@@ -319,6 +305,28 @@ func (b *Bridge) route(ctx context.Context, t Client, msg Inbound) {
 	case c.inbox <- msg:
 	default:
 		notify(ctx, t, msg.ChatID, "busy — try again shortly")
+	}
+}
+
+// cancel stops the prompt in flight for this chat: nothing to cancel, or no
+// agent to tell, is said to the chat rather than left silent.
+func (b *Bridge) cancel(ctx context.Context, c *chat) {
+	var id acp.SessionID
+	c.set(func() {
+		if c.approver != "" {
+			id = c.session
+		}
+	})
+	if id == "" {
+		notify(ctx, c.t, c.id, "Nothing to cancel.")
+		return
+	}
+	r := b.live()
+	if r == nil {
+		return
+	}
+	if err := r.conn.Cancel(ctx, acp.CancelNotification{SessionID: id}); err != nil {
+		b.Logger.Warn("cancel failed", "chat", c.key, "err", err)
 	}
 }
 

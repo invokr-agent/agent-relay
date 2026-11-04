@@ -736,7 +736,9 @@ func TestSessionFromAReplacedAgentIsDropped(t *testing.T) {
 	var held = &chat{key: "fake:me", id: "me", t: newFakeClient(true),
 		inbox: make(chan Inbound, inboxCap)}
 	held.set(func() { held.session = acp.SessionID("s9") })
-	s.SetSessionID(held.key, "s9")
+	if err := s.SetSessionID(held.key, "s9"); err != nil {
+		t.Fatal(err)
+	}
 
 	if err := b.openSession(ctx, held, old); err == nil || !strings.Contains(err.Error(), "agent restarted") {
 		t.Fatalf("loading through the replaced agent: %v, want it dropped", err)
