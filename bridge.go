@@ -41,15 +41,16 @@ type Bridge struct {
 
 	// Relayed is set by Connect before it returns a socket connection: losing an
 	// agent the relay can re-dial is not fatal, unlike losing one it spawned.
-	Relayed   bool
-	liveConn  *acp.ClientConn         // the connection Run's defer closes; Run's goroutine only
-	reached   atomic.Pointer[Reached] // the agent connection currently live
-	chats     map[string]*chat        // chat key → chat; Run's goroutine only
-	sessions  sync.Map                // acp.SessionID → *chat
-	approvals atomic.Int64
-	cmdMu     sync.Mutex
-	menuMu    sync.Mutex
-	cmds      agentCommands
+	Relayed     bool
+	liveConn    *acp.ClientConn         // the connection Run's defer closes; Run's goroutine only
+	reached     atomic.Pointer[Reached] // the agent connection currently live
+	chats       map[string]*chat        // chat key → chat; Run's goroutine only
+	sessions    sync.Map                // acp.SessionID → *chat
+	approvals   atomic.Int64
+	generations atomic.Int32 // bumped per reach: which agent a result belongs to
+	cmdMu       sync.Mutex
+	menuMu      sync.Mutex
+	cmds        agentCommands
 }
 
 type chat struct {
@@ -90,9 +91,10 @@ type Connector func(ctx context.Context) (conn *acp.ClientConn, label string, er
 // it wholesale when it re-dials, so a chat that snapshots it once speaks to
 // one agent for the whole turn, and never reads a field Run is writing.
 type Reached struct {
-	conn    *acp.ClientConn
-	ctx     context.Context
-	canLoad bool
+	conn       *acp.ClientConn
+	ctx        context.Context
+	canLoad    bool
+	generation int32 // which reach this agent came from; Run bumps it per connection
 }
 
 // live is the currently reached agent, and nil until the first one answers:
@@ -227,9 +229,18 @@ func (b *Bridge) initialize(ctx context.Context, conn *acp.ClientConn) error {
 	// Published once the agent answered: a chat starting on this connection
 	// sees a reached agent, never a half-initialized one, and sees the whole
 	// replacement when Run swaps it for another agent.
-	b.reached.Store(&Reached{conn: conn, ctx: ctx,
-		canLoad: init.AgentCapabilities != nil && init.AgentCapabilities.LoadSession})
+	b.reached.Store(&Reached{conn: conn, ctx: ctx, canLoad: init.AgentCapabilities != nil &&
+		init.AgentCapabilities.LoadSession, generation: b.generations.Add(1)})
 	return nil
+}
+
+// fresh says the agent a turn snapshotted is still the one Run reached. A
+// session asked of an older generation belongs to an agent the relay has
+// already replaced: storing it would leave a later turn loading an id the
+// live agent never made, so the result is dropped and the chat reopens.
+func (b *Bridge) fresh(reached *Reached) bool {
+	live := b.reached.Load()
+	return live != nil && live.generation == reached.generation
 }
 
 type delivery struct {
@@ -388,6 +399,10 @@ func (b *Bridge) handle(ctx context.Context, c *chat, msg Inbound) error {
 }
 
 func (b *Bridge) openSession(ctx context.Context, c *chat, reached *Reached) error {
+	if !b.fresh(reached) { // this chat was asked of an agent already replaced:
+		// nothing it says about a session belongs to the agent now live
+		return errors.New("open session: agent restarted")
+	}
 	stored := b.Store.SessionID(c.key)
 	if stored == "" || !reached.canLoad {
 		return b.newSession(ctx, c, reached)
@@ -396,6 +411,10 @@ func (b *Bridge) openSession(ctx context.Context, c *chat, reached *Reached) err
 	b.sessions.Store(c.current(), c)
 	_, err := reached.conn.LoadSession(ctx, acp.LoadSessionRequest{SessionID: c.current(), Cwd: b.Cwd, MCPServers: []acp.MCPServer{}})
 	c.set(func() { c.loading = false })
+	if !b.fresh(reached) { // the agent this load asked is gone: the id belongs
+		// to it, not to the agent now live, so the chat starts over instead
+		return errors.New("open session: agent restarted")
+	}
 	if err != nil {
 		b.Logger.Warn("stored session did not load; starting a new one", "chat", c.key, "err", err)
 		return b.newSession(ctx, c, reached)
@@ -407,6 +426,11 @@ func (b *Bridge) newSession(ctx context.Context, c *chat, reached *Reached) erro
 	resp, err := reached.conn.NewSession(ctx, acp.NewSessionRequest{Cwd: b.Cwd, MCPServers: []acp.MCPServer{}})
 	if err != nil {
 		return fmt.Errorf("new session: %w", err)
+	}
+	if !b.fresh(reached) { // the agent that made this session is gone: its id
+		// must not reach the store, or a later turn loads an id the live agent
+		// never made
+		return errors.New("new session: agent restarted")
 	}
 	b.sessions.Delete(c.current())
 	c.set(func() { c.session = resp.SessionID })

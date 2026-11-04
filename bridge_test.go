@@ -666,6 +666,11 @@ func TestBridgeReconnectRacesATurn(t *testing.T) {
 	if !waited(func() bool { return dials.Load() == 2 }) {
 		t.Fatalf("the bridge never re-dialled: %v", runErr)
 	}
+	// Each reach is a new generation: a result from an older one belongs to an
+	// agent the relay has left behind, and is dropped rather than stored.
+	if live := b.reached.Load(); live == nil || live.generation != 2 {
+		t.Fatalf("the bridge is on a stale generation, want one per reach")
+	}
 	chat.say("hi") // this turn loads the stored session on agent 2...
 	<-loaded       // ...and agent 2 reports the load is inside it
 	second := <-used
@@ -694,5 +699,61 @@ func TestBridgeReconnectRacesATurn(t *testing.T) {
 	<-done
 	if runErr != nil {
 		t.Fatalf("Run returned %v, want it to keep serving a relayed agent", runErr)
+	}
+}
+
+// A session asked of an agent the relay has already replaced must not land:
+// the store would then hold an id the live agent never made, and the next
+// turn would load an id it cannot. The bridge drops the result of such a
+// call instead, and the chat reopens on the agent that is live.
+func TestSessionFromAReplacedAgentIsDropped(t *testing.T) {
+	dir := t.TempDir()
+	sock := filepath.Join(dir, "agent.sock")
+	s, err := NewStore(filepath.Join(dir, "sessions.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var first = make(chan *fakeAgent, 1) // the agent this connection speaks to
+	serveFakeAgents(t, sock, func(a *fakeAgent, n int) {
+		if n == 1 {
+			first <- a
+		}
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	b := &Bridge{Store: s, Clients: []Client{newFakeClient(true)},
+		Logger: slog.New(slog.DiscardHandler), Cwd: dir}
+	c, derr := net.Dial("unix", sock)
+	if derr != nil {
+		t.Fatal(derr)
+	}
+	var conn = acp.Connect(ctx, b, c, c)
+	defer func() { _ = conn.Close() }()
+	// The chat holds this agent, and the relay is on a later generation: the
+	// agent below is the one that has already been replaced.
+	var old = &Reached{conn: conn, ctx: ctx, canLoad: true, generation: 1}
+	b.reached.Store(&Reached{conn: nil, ctx: ctx, canLoad: true, generation: 2})
+	var held = &chat{key: "fake:me", id: "me", t: newFakeClient(true),
+		inbox: make(chan Inbound, inboxCap)}
+	held.set(func() { held.session = acp.SessionID("s9") })
+	s.SetSessionID(held.key, "s9")
+
+	if err := b.openSession(ctx, held, old); err == nil || !strings.Contains(err.Error(), "agent restarted") {
+		t.Fatalf("loading through the replaced agent: %v, want it dropped", err)
+	}
+	if err := b.newSession(ctx, held, old); err == nil || !strings.Contains(err.Error(), "agent restarted") {
+		t.Fatalf("starting a session on the replaced agent: %v, want it dropped", err)
+	}
+	if s.SessionID(held.key) != "s9" {
+		t.Fatalf("the store says %q, want the id it had before", s.SessionID(held.key))
+	}
+	if _, had := b.sessions.Load("s9"); had {
+		t.Fatal("the replaced agent's session still routes to this chat")
+	}
+	if _, had := b.sessions.Load("s1"); had {
+		t.Fatal("the new session the replaced agent made still routes to this chat")
+	}
+	if made := (<-first).sessions.Load(); made != 1 {
+		t.Fatalf("the replaced agent made %d sessions, want the calls to have run", made)
 	}
 }
