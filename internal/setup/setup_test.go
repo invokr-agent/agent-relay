@@ -203,6 +203,37 @@ func TestApplyRejectsUnknownAndOverflow(t *testing.T) {
 	}
 }
 
+// agent_socket is an optional answer: stored as given, and a path that is not
+// absolute is refused rather than guessed at.
+func TestApplyAgentSocket(t *testing.T) {
+	keyring.MockInit()
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	fakeTelegram(t, getMe)
+	path := config.Path()
+	if err := Apply(context.Background(), path, "telegram", Answers{"token": token, "agent": `["my-agent","acp"]`, "agent_socket": "/run/user/1000/agent.sock"}); err != nil {
+		t.Fatal(err)
+	}
+	cfg, _ := config.Load(path)
+	if cfg.AgentSocket != "/run/user/1000/agent.sock" {
+		t.Fatalf("agent_socket = %q, config = %+v", cfg.AgentSocket, cfg)
+	}
+	for _, in := range []string{"relative/agent.sock", "~/agent.sock"} {
+		fe, ok := errors.AsType[*FieldError](Apply(context.Background(), path, "telegram", Answers{"token": token, "agent_socket": in}))
+		if !ok || fe.Key != "agent_socket" {
+			t.Fatalf("%q: err = %v", in, fe)
+		}
+	}
+	if d, _ := Describe(path, "telegram"); !slices.ContainsFunc(d[0].Fields, func(f Field) bool { return f.Key == "agent_socket" }) {
+		t.Fatal("agent_socket not described for setup to ask")
+	}
+	if Apply(context.Background(), path, "telegram", Answers{"token": token, "agent_socket": ""}) != nil {
+		t.Fatal("an empty agent_socket answer rejected")
+	}
+	if cfg, _ = config.Load(path); cfg.AgentSocket != "/run/user/1000/agent.sock" {
+		t.Fatalf("empty answer cleared the stored socket: %q", cfg.AgentSocket)
+	}
+}
+
 func TestDescribeReturnsCopies(t *testing.T) {
 	d, _ := Describe("", "telegram")
 	d[0].Fields[0].Key = "mutated"
