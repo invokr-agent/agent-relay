@@ -1,6 +1,8 @@
 package main
 
 import (
+	"context"
+	"log/slog"
 	"net"
 	"os"
 	"path/filepath"
@@ -9,6 +11,7 @@ import (
 
 	"github.com/zalando/go-keyring"
 
+	relay "github.com/invokr-agent/agent-relay"
 	"github.com/invokr-agent/agent-relay/internal/config"
 	"github.com/invokr-agent/agent-relay/internal/instance"
 	"github.com/invokr-agent/agent-relay/internal/secrets"
@@ -63,6 +66,30 @@ func TestAgentEnvDropsRelayVars(t *testing.T) {
 	got := agentEnv([]string{"HOME=/h", "AGENT_RELAY_TELEGRAM_TOKEN=x", "AGENT_RELAY_OTHER=y"})
 	if len(got) != 1 || got[0] != "HOME=/h" {
 		t.Fatalf("env = %q", got)
+	}
+}
+
+// A socket that has gone gives way to a spawned agent, and that agent is not
+// one the relay can dial again: the connector must stop saying otherwise, or
+// the spawned agent's exit reads as a reconnect and the relay spawns it anew
+// forever.
+func TestConnectorSpawnFallbackIsNotRelayed(t *testing.T) {
+	dir := t.TempDir()
+	bridge := &relay.Bridge{Logger: slog.New(slog.DiscardHandler), Cwd: dir}
+	cfg := config.Config{Agent: []string{"cat"},
+		AgentSocket: filepath.Join(dir, "gone.sock")}
+	connect := agentConnector(bridge, cfg)
+	bridge.Relayed = true // as it is when Run re-dialls a socket agent that went away
+	conn, label, err := connect(context.Background())
+	if err != nil {
+		t.Fatalf("spawn fallback: %v", err)
+	}
+	defer func() { _ = conn.Close() }()
+	if label != "spawned cat" {
+		t.Fatalf("label = %q", label)
+	}
+	if bridge.Relayed {
+		t.Fatal("the spawn path still marks the agent as one the relay can re-dial")
 	}
 }
 

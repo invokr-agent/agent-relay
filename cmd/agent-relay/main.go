@@ -174,6 +174,7 @@ func agentConnector(bridge *relay.Bridge, cfg config.Config) relay.Connector {
 			}
 			bridge.Logger.Warn("agent socket not used", "socket", path, "err", derr)
 		}
+		bridge.Relayed = false // a spawned agent cannot be re-dialled: its exit ends Run
 		agent := exec.CommandContext(ctx, cfg.Agent[0], cfg.Agent[1:]...)
 		agent.Dir, agent.Stderr = cfg.Cwd, os.Stderr
 		agent.Env = agentEnv(os.Environ())
