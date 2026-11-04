@@ -41,16 +41,14 @@ type Bridge struct {
 
 	// Relayed is set by Connect before it returns a socket connection: losing an
 	// agent the relay can re-dial is not fatal, unlike losing one it spawned.
-	Relayed     bool
-	liveConn    *acp.ClientConn         // the connection Run's defer closes; Run's goroutine only
-	reached     atomic.Pointer[Reached] // the agent connection currently live
-	chats       map[string]*chat        // chat key → chat; Run's goroutine only
-	sessions    sync.Map                // acp.SessionID → *chat
-	approvals   atomic.Int64
-	generations atomic.Int32 // bumped per reach: which agent a result belongs to
-	cmdMu       sync.Mutex
-	menuMu      sync.Mutex
-	cmds        agentCommands
+	Relayed   bool
+	reached   atomic.Pointer[Reached] // the agent connection currently live
+	chats     map[string]*chat        // chat key → chat; Run's goroutine only
+	sessions  sync.Map                // acp.SessionID → *chat
+	approvals atomic.Int64
+	cmdMu     sync.Mutex
+	menuMu    sync.Mutex
+	cmds      agentCommands
 }
 
 type chat struct {
@@ -91,10 +89,9 @@ type Connector func(ctx context.Context) (conn *acp.ClientConn, label string, er
 // it wholesale when it re-dials, so a chat that snapshots it once speaks to
 // one agent for the whole turn, and never reads a field Run is writing.
 type Reached struct {
-	conn       *acp.ClientConn
-	ctx        context.Context
-	canLoad    bool
-	generation int32 // which reach this agent came from; Run bumps it per connection
+	conn    *acp.ClientConn
+	ctx     context.Context
+	canLoad bool
 }
 
 // live is the currently reached agent, and nil until the first one answers:
@@ -111,9 +108,16 @@ func (b *Bridge) Run(ctx context.Context, connect Connector) error {
 	}
 	// Closed once on return; a connection lost to a reconnect is closed there
 	// instead, so the defers cannot stack one per connection.
-	defer b.closeLiveConn()
+	var conn *acp.ClientConn
+	defer func() {
+		if conn != nil {
+			_ = conn.Close()
+		}
+	}()
 	for backoff := time.Duration(0); ; {
-		conn, label, reachErr := b.reach(ctx, connect)
+		var label string
+		var reachErr error
+		conn, label, reachErr = b.reach(ctx, connect)
 		if reachErr != nil {
 			return reachErr
 		}
@@ -125,9 +129,9 @@ func (b *Bridge) Run(ctx context.Context, connect Connector) error {
 		if ctx.Err() != nil {
 			return nil
 		}
-		b.liveConn = nil
 		b.announceLostAgent(conn, label)
 		_ = conn.Close()
+		conn = nil
 		if !b.pauseBeforeRedial(ctx, &backoff) {
 			return nil
 		}
@@ -142,7 +146,6 @@ func (b *Bridge) reach(ctx context.Context, connect Connector) (*acp.ClientConn,
 	if err != nil {
 		return nil, "", fmt.Errorf("messaging: start agent: %w", err)
 	}
-	b.liveConn = conn
 	if initErr := b.initialize(ctx, conn); initErr != nil {
 		return conn, label, initErr
 	}
@@ -151,15 +154,6 @@ func (b *Bridge) reach(ctx context.Context, connect Connector) (*acp.ClientConn,
 	// a replacement agent's commands replace the ones the old agent had.
 	b.probeCommands(ctx, conn)
 	return conn, label, nil
-}
-
-// closeLiveConn closes the agent connection still live when Run returns. A
-// connection lost to a reconnect is closed there instead, so Run's defer
-// cannot stack one per connection.
-func (b *Bridge) closeLiveConn() {
-	if b.liveConn != nil {
-		_ = b.liveConn.Close()
-	}
 }
 
 // serveChats serves one agent connection: it routes inbound messages until
@@ -230,17 +224,17 @@ func (b *Bridge) initialize(ctx context.Context, conn *acp.ClientConn) error {
 	// sees a reached agent, never a half-initialized one, and sees the whole
 	// replacement when Run swaps it for another agent.
 	b.reached.Store(&Reached{conn: conn, ctx: ctx, canLoad: init.AgentCapabilities != nil &&
-		init.AgentCapabilities.LoadSession, generation: b.generations.Add(1)})
+		init.AgentCapabilities.LoadSession})
 	return nil
 }
 
 // fresh says the agent a turn snapshotted is still the one Run reached. A
-// session asked of an older generation belongs to an agent the relay has
+// session asked of an earlier agent belongs to one the relay has
 // already replaced: storing it would leave a later turn loading an id the
 // live agent never made, so the result is dropped and the chat reopens.
 func (b *Bridge) fresh(reached *Reached) bool {
 	live := b.reached.Load()
-	return live != nil && live.generation == reached.generation
+	return live != nil && live == reached
 }
 
 type delivery struct {

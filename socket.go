@@ -95,33 +95,10 @@ func blame(err error, uid int) string {
 	return fmt.Sprintf("uid %d is not your uid %d", uid, os.Getuid())
 }
 
-// dial connects to path, bounded by dialTimeout.
 func dial(path string) (*net.UnixConn, error) {
-	target, err := net.ResolveUnixAddr("unix", path)
+	conn, err := net.DialTimeout("unix", path, dialTimeout)
 	if err != nil {
 		return nil, err
 	}
-	got := make(chan dialResult, 1)
-	go func() {
-		conn, err := net.DialUnix("unix", nil, target)
-		got <- dialResult{conn, err}
-	}()
-	select {
-	case late := <-got:
-		return late.conn, late.err
-	case <-time.After(dialTimeout):
-		// A dial that lands after the timeout is closed, never handed to the relay.
-		go func() {
-			if late := <-got; late.conn != nil {
-				_ = late.conn.Close()
-			}
-		}()
-		return nil, fmt.Errorf("no answer from the socket within %s", dialTimeout)
-	}
-}
-
-// dialResult is what the bounded dial came back with.
-type dialResult struct {
-	conn *net.UnixConn
-	err  error
+	return conn.(*net.UnixConn), nil
 }

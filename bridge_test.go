@@ -666,11 +666,6 @@ func TestBridgeReconnectRacesATurn(t *testing.T) {
 	if !waited(func() bool { return dials.Load() == 2 }) {
 		t.Fatalf("the bridge never re-dialled: %v", runErr)
 	}
-	// Each reach is a new generation: a result from an older one belongs to an
-	// agent the relay has left behind, and is dropped rather than stored.
-	if live := b.reached.Load(); live == nil || live.generation != 2 {
-		t.Fatalf("the bridge is on a stale generation, want one per reach")
-	}
 	chat.say("hi") // this turn loads the stored session on agent 2...
 	<-loaded       // ...and agent 2 reports the load is inside it
 	second := <-used
@@ -731,8 +726,8 @@ func TestSessionFromAReplacedAgentIsDropped(t *testing.T) {
 	defer func() { _ = conn.Close() }()
 	// The chat holds this agent, and the relay is on a later generation: the
 	// agent below is the one that has already been replaced.
-	var old = &Reached{conn: conn, ctx: ctx, canLoad: true, generation: 1}
-	b.reached.Store(&Reached{conn: nil, ctx: ctx, canLoad: true, generation: 2})
+	var old = &Reached{conn: conn, ctx: ctx, canLoad: true}
+	b.reached.Store(&Reached{conn: nil, ctx: ctx, canLoad: true})
 	var held = &chat{key: "fake:me", id: "me", t: newFakeClient(true),
 		inbox: make(chan Inbound, inboxCap)}
 	held.set(func() { held.session = acp.SessionID("s9") })
