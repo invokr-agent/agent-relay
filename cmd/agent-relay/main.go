@@ -99,7 +99,7 @@ func run(path, cwd string, logger *slog.Logger) error {
 		return err
 	}
 	cfg.Cwd = cmp.Or(cwd, cfg.Cwd)
-	release, err := instance.Acquire(instance.Info{PID: os.Getpid(), Cwd: cfg.Cwd, Mode: runMode(), Started: time.Now()})
+	release, err := instance.Acquire(instance.Info{PID: os.Getpid(), Cwd: cfg.Cwd, Mode: runMode(), Agent: agentTransport(cfg), Started: time.Now()})
 	if err != nil {
 		return err
 	}
@@ -143,6 +143,21 @@ func run(path, cwd string, logger *slog.Logger) error {
 	logger.Info("agent-relay starting", info...)
 	bridge := &relay.Bridge{Store: store, Clients: clients, Logger: logger, Cwd: cfg.Cwd, RateLimit: cfg.RateLimit, Version: version, Notice: notice, Audit: slog.New(slog.NewJSONHandler(audit, nil))}
 	return bridge.Run(ctx, agentConnector(bridge, cfg))
+}
+
+// agentTransport labels how this relay reaches its agent, for the lock file and
+// so for `agent-relay status`: the socket when it is trusted and live, the
+// configured argv otherwise. The probe connection is closed at once — an agent
+// that serves a socket sees it open and close — and the connector logs why a
+// configured socket was refused.
+func agentTransport(cfg config.Config) string {
+	if cfg.AgentSocket != "" {
+		if sock, err := relay.DialAgent(cfg.AgentSocket); err == nil {
+			defer func() { _ = sock.Close() }()
+			return "socket " + cfg.AgentSocket
+		}
+	}
+	return "spawned " + cfg.Agent[0]
 }
 
 // agentConnector reaches the agent: an agent already listening on the configured

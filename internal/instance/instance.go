@@ -17,7 +17,8 @@ import (
 type Info struct {
 	PID     int       `json:"pid"`
 	Cwd     string    `json:"cwd"`
-	Mode    string    `json:"mode"` // foreground, detached or service
+	Mode    string    `json:"mode"`  // foreground, detached or service
+	Agent   string    `json:"agent"` // how this relay reaches its agent: "socket <path>" or "spawned <argv0>"
 	Started time.Time `json:"started"`
 }
 

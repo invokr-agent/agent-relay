@@ -188,8 +188,8 @@ func runStatus(out io.Writer) error {
 	if !ok {
 		return errors.New("agent-relay is not running")
 	}
-	_, _ = fmt.Fprintf(out, "agent-relay running (pid %d, %s) for %s, up %s\nlogs: %s\n",
-		info.PID, info.Mode, info.Cwd, time.Since(info.Started).Round(time.Second), logPath())
+	_, _ = fmt.Fprintf(out, "agent-relay running (pid %d, %s) for %s, up %s\nagent: %s\nlogs: %s\n",
+		info.PID, info.Mode, info.Cwd, time.Since(info.Started).Round(time.Second), info.Agent, logPath())
 	return nil
 }
 

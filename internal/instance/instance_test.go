@@ -14,11 +14,11 @@ func TestOneHolderAtATime(t *testing.T) {
 	if _, ok, err := Running(); ok || err != nil {
 		t.Fatalf("Running before any lock = %v, %v", ok, err)
 	}
-	release, err := Acquire(Info{PID: 42, Cwd: "/a", Mode: "detached"})
+	release, err := Acquire(Info{PID: 42, Cwd: "/a", Mode: "detached", Agent: "spawned my-agent"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if info, ok, err := Running(); !ok || err != nil || info.PID != 42 || info.Cwd != "/a" {
+	if info, ok, err := Running(); !ok || err != nil || info.PID != 42 || info.Cwd != "/a" || info.Agent != "spawned my-agent" {
 		t.Fatalf("Running while held = %+v, %v, %v", info, ok, err)
 	}
 	var running ErrRunning

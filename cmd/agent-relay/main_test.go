@@ -1,6 +1,7 @@
 package main
 
 import (
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -8,6 +9,8 @@ import (
 
 	"github.com/zalando/go-keyring"
 
+	"github.com/invokr-agent/agent-relay/internal/config"
+	"github.com/invokr-agent/agent-relay/internal/instance"
 	"github.com/invokr-agent/agent-relay/internal/secrets"
 )
 
@@ -60,5 +63,47 @@ func TestAgentEnvDropsRelayVars(t *testing.T) {
 	got := agentEnv([]string{"HOME=/h", "AGENT_RELAY_TELEGRAM_TOKEN=x", "AGENT_RELAY_OTHER=y"})
 	if len(got) != 1 || got[0] != "HOME=/h" {
 		t.Fatalf("env = %q", got)
+	}
+}
+
+// The transport a relay reached its agent over is what it records in the lock,
+// so `agent-relay status` can show it: the socket when a live agent answers
+// there, the spawned argv otherwise.
+func TestTransportLabel(t *testing.T) {
+	dir := t.TempDir()
+	live := filepath.Join(dir, "agent.sock")
+	l, err := net.Listen("unix", live)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = l.Close() }()
+	cfg := config.Config{Agent: []string{"my-agent", "acp"}, AgentSocket: live}
+	if got := agentTransport(cfg); got != "socket "+live {
+		t.Fatalf("live socket: %q", got)
+	}
+	cfg.AgentSocket = filepath.Join(dir, "gone.sock")
+	if got := agentTransport(cfg); got != "spawned my-agent" {
+		t.Fatalf("no agent on the socket: %q", got)
+	}
+	cfg.AgentSocket = ""
+	if got := agentTransport(cfg); got != "spawned my-agent" {
+		t.Fatalf("no agent_socket configured: %q", got)
+	}
+}
+
+// status names the transport, taken from the lock file.
+func TestStatusShowsTransport(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	release, err := instance.Acquire(instance.Info{PID: 42, Cwd: "/a", Mode: "detached", Agent: "socket /run/user/1000/agent.sock"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer release()
+	out := new(strings.Builder)
+	if err := runStatus(out); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out.String(), "agent: socket /run/user/1000/agent.sock") {
+		t.Fatalf("status = %s", out.String())
 	}
 }
