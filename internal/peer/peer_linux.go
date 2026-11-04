@@ -1,4 +1,6 @@
-package signalrpc
+//go:build linux
+
+package peer
 
 import (
 	"net"

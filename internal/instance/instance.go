@@ -17,7 +17,8 @@ import (
 type Info struct {
 	PID     int       `json:"pid"`
 	Cwd     string    `json:"cwd"`
-	Mode    string    `json:"mode"` // foreground, detached or service
+	Mode    string    `json:"mode"`  // foreground, detached or service
+	Agent   string    `json:"agent"` // how this relay reaches its agent: "socket <path>" or "spawned <argv0>"
 	Started time.Time `json:"started"`
 }
 
@@ -45,37 +46,50 @@ func lockPath() string { return filepath.Join(Dir(), "relay.lock") }
 const busyWait = 500 * time.Millisecond
 
 // Acquire takes the lock for info, or returns ErrRunning naming the holder.
-// release unlocks it; exiting does the same.
-func Acquire(info Info) (release func(), err error) {
+// release unlocks it; record rewrites what the file says about how this relay
+// reaches its agent, which the relay can only know once it has reached one
+// (exiting unlocks the file the same as release does). record reports a write
+// that did not land; a stale label is a log line, not a reason to stop.
+func Acquire(info Info) (release func(), record func(agent string) error, err error) {
 	path := lockPath()
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE|syscall.O_NOFOLLOW, 0o600)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if err := lockExclusive(f); err != nil {
 		_ = f.Close()
 		if errors.Is(err, syscall.EWOULDBLOCK) {
 			held, err := read(path)
 			if err != nil {
-				return nil, errors.New("agent-relay lock is busy; try again")
+				return nil, nil, errors.New("agent-relay lock is busy; try again")
 			}
-			return nil, ErrRunning{held}
+			return nil, nil, ErrRunning{held}
 		}
-		return nil, err
+		return nil, nil, err
 	}
+	if err := write(f, info); err != nil {
+		_ = f.Close()
+		return nil, nil, err
+	}
+	return func() { _ = f.Close() }, func(agent string) error {
+		info.Agent = agent // the holder's own copy: only the relay's goroutine calls this
+		return write(f, info)
+	}, nil
+}
+
+// write records info on the held fd: truncate-then-write, which a reader's
+// retry in read tolerates. A label rewrite that fails leaves the earlier one
+// on disk; the lock is still held.
+func write(f *os.File, info Info) error {
 	data, _ := json.Marshal(info)
 	if err := f.Truncate(0); err != nil {
-		_ = f.Close()
-		return nil, err
+		return err
 	}
-	if _, err := f.WriteAt(data, 0); err != nil {
-		_ = f.Close()
-		return nil, err
-	}
-	return func() { _ = f.Close() }, nil
+	_, err := f.WriteAt(data, 0)
+	return err
 }
 
 // lockExclusive retries for busyWait, so a concurrent `status` cannot make a

@@ -38,6 +38,8 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/invokr-agent/acp"
+
 	relay "github.com/invokr-agent/agent-relay"
 	"github.com/invokr-agent/agent-relay/clients/matrix"
 	signalcli "github.com/invokr-agent/agent-relay/clients/signal"
@@ -97,7 +99,7 @@ func run(path, cwd string, logger *slog.Logger) error {
 		return err
 	}
 	cfg.Cwd = cmp.Or(cwd, cfg.Cwd)
-	release, err := instance.Acquire(instance.Info{PID: os.Getpid(), Cwd: cfg.Cwd, Mode: runMode(), Started: time.Now()})
+	release, record, err := instance.Acquire(instance.Info{PID: os.Getpid(), Cwd: cfg.Cwd, Mode: runMode(), Agent: notReached, Started: time.Now()})
 	if err != nil {
 		return err
 	}
@@ -139,12 +141,51 @@ func run(path, cwd string, logger *slog.Logger) error {
 		info = append(info, "matrix_user", m.UserID, "matrix_users", len(m.AllowedUsers))
 	}
 	logger.Info("agent-relay starting", info...)
-	agent := exec.CommandContext(ctx, cfg.Agent[0], cfg.Agent[1:]...)
-	agent.Dir = cfg.Cwd
-	agent.Stderr = os.Stderr
-	agent.Env = agentEnv(os.Environ())
 	bridge := &relay.Bridge{Store: store, Clients: clients, Logger: logger, Cwd: cfg.Cwd, RateLimit: cfg.RateLimit, Version: version, Notice: notice, Audit: slog.New(slog.NewJSONHandler(audit, nil))}
-	return bridge.Run(ctx, agent)
+	return bridge.Run(ctx, agentConnector(bridge, cfg, record))
+}
+
+// notReached is what the lock says about the agent until the relay reaches one.
+// Only the connector knows which agent it reached, and guessing early meant
+// dialling the socket for the label alone: a stray connection the agent sees
+// open and close, for a socket that connector might then refuse.
+const notReached = "not reached yet"
+
+// agentConnector reaches the agent: an agent already listening on the configured
+// socket when that socket passes DialAgent's trust checks and answers, and the
+// configured argv otherwise. Run calls it again when a relayed agent goes away,
+// so the choice is re-made then: a socket that has gone gives way to a spawn.
+// Each reach records the label it came in on, so the lock - and `agent-relay
+// status` with it - names the agent this relay is talking to now.
+func agentConnector(bridge *relay.Bridge, cfg config.Config, record func(agent string) error) relay.Connector {
+	return func(ctx context.Context) (conn *acp.ClientConn, label string, err error) {
+		// The label travels with the reach that made it, so the lock and `status`
+		// name the agent this relay is talking to now; a lock that will not take
+		// it is a log line, not a failed start.
+		say := func(agent string) {
+			if e := record(agent); e != nil {
+				bridge.Logger.Warn("agent transport not recorded in the lock", "err", e)
+			}
+		}
+		if path := cfg.AgentSocket; path != "" {
+			sock, derr := relay.DialAgent(path)
+			if derr == nil {
+				bridge.Relayed = true // losing this agent is not fatal: it can be dialled again
+				label = "socket " + path
+				say(label)
+				return acp.Connect(ctx, bridge, sock, sock), label, nil
+			}
+			bridge.Logger.Warn("agent socket not used", "socket", path, "err", derr)
+		}
+		bridge.Relayed = false // a spawned agent cannot be re-dialled: its exit ends Run
+		label = "spawned " + cfg.Agent[0]
+		say(label)
+		agent := exec.CommandContext(ctx, cfg.Agent[0], cfg.Agent[1:]...)
+		agent.Dir, agent.Stderr = cfg.Cwd, os.Stderr
+		agent.Env = agentEnv(os.Environ())
+		conn, err = acp.Spawn(ctx, bridge, agent)
+		return conn, label, err
+	}
 }
 
 // agentEnv drops AGENT_RELAY_* so the agent cannot read relay secrets.

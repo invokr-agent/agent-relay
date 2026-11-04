@@ -46,19 +46,27 @@ type Answers map[string]string
 
 var agentField = Field{Key: "agent", Label: "Agent command", Type: "list", Help: `ACP agent argv, run without a shell: a JSON array (e.g. ["my-agent","acp"]); interactive setup splits on spaces`}
 
+// An agent already running can be reached over the Unix socket it listens on
+// instead of spawned; the answer is optional, and empty means keep what the
+// config already says. "-" clears a stored socket, moving the relay back to
+// spawning the agent command.
+var agentSocketField = Field{Key: "agent_socket", Label: "Agent socket",
+	Help:    `Unix socket an already-running ACP agent listens on (absolute path); '-' clears a stored one, empty: keep it`,
+	Pattern: `^(-|/[[:graph:]]+)?$`}
+
 var descriptors = []Descriptor{
 	{Client: "telegram", Pairing: "code", Notice: "Telegram is not end-to-end encrypted; prefer Signal for sensitive work.",
 		Fields: []Field{
 			{Key: "token", Label: "Bot token", Help: "from @BotFather, like 123456:ABC…", Secret: true, Required: true, Pattern: `^[0-9]+:[A-Za-z0-9_-]{30,}$`},
 			{Key: "allowed_user_ids", Label: "Allowed user IDs", Help: "comma-separated; replaces the list; or pair later", Pattern: `^[0-9, ]*$`},
-			agentField,
+			agentField, agentSocketField,
 		}},
 	{Client: "signal", Pairing: "qr",
 		Fields: []Field{
 			{Key: "socket", Label: "signal-cli socket", Help: "Unix socket of signal-cli in JSON-RPC daemon mode", Required: true},
 			{Key: "account", Label: "Signal account", Help: "the relay's number, e.g. +15551234567", Pattern: `^(\+[0-9]+)?$`},
 			{Key: "allowed_numbers", Label: "Allowed numbers", Help: "comma-separated; replaces the list", Pattern: `^(\+[0-9]+)(, *\+[0-9]+)*$|^$`},
-			agentField,
+			agentField, agentSocketField,
 		}},
 	{Client: "matrix", Pairing: "code", Notice: "agent-relay reads unencrypted rooms only: start the chat with end-to-end encryption off.",
 		Fields: []Field{
@@ -66,7 +74,7 @@ var descriptors = []Descriptor{
 			{Key: "user_id", Label: "Bot user ID", Help: "like @relay:example.org", Required: true, Pattern: `^@[^:\s]+:\S+$`},
 			{Key: "access_token", Label: "Access token", Help: "of the bot account", Secret: true, Required: true},
 			{Key: "allowed_users", Label: "Allowed users", Help: "comma-separated user IDs; replaces the list; or pair later", Pattern: `^(@[^:\s,]+:[^\s,]+)?(, *@[^:\s,]+:[^\s,]+)*$`},
-			agentField,
+			agentField, agentSocketField,
 		}},
 }
 
@@ -173,6 +181,13 @@ func Apply(ctx context.Context, path, client string, a Answers) error {
 		cfg.Agent = argv
 	} else if len(cfg.Agent) == 0 {
 		return &FieldError{"agent", "is required"}
+	}
+	// agent_socket is optional: an empty answer leaves the stored one alone,
+	// "-" clears it (the relay spawns the agent command again).
+	if s := a["agent_socket"]; s == "-" {
+		cfg.AgentSocket = ""
+	} else if s != "" {
+		cfg.AgentSocket = s
 	}
 	return save(path, &cfg, client, a)
 }

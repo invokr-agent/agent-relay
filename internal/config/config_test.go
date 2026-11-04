@@ -11,7 +11,7 @@ import (
 
 func TestSaveLoadRoundTripAndModes(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "agent-relay", "config.json")
-	want := Config{Agent: []string{"my-agent", "acp"}, Telegram: &Telegram{AllowedUserIDs: []int64{7}}}
+	want := Config{Agent: []string{"my-agent", "acp"}, AgentSocket: "/run/user/1000/agent.sock", Telegram: &Telegram{AllowedUserIDs: []int64{7}}}
 	if err := Save(path, want); err != nil {
 		t.Fatal(err)
 	}
@@ -23,6 +23,44 @@ func TestSaveLoadRoundTripAndModes(t *testing.T) {
 	got, err := Load(path)
 	if err != nil || got.Version != Version || got.Telegram.AllowedUserIDs[0] != 7 {
 		t.Fatalf("Load = %+v, %v", got, err)
+	}
+	if got.AgentSocket != "/run/user/1000/agent.sock" {
+		t.Fatalf("agent_socket = %q", got.AgentSocket)
+	}
+}
+
+// agent_socket is optional: an unset one stays out of the file, and a file
+// without it loads as today.
+func TestAgentSocketOptional(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "c.json")
+	if err := Save(path, Config{Agent: []string{"a"}}); err != nil {
+		t.Fatal(err)
+	}
+	data, _ := os.ReadFile(path)
+	if strings.Contains(string(data), "agent_socket") {
+		t.Fatalf("unset agent_socket written: %s", data)
+	}
+	if err := Save(path, Config{Agent: []string{"a"}, AgentSocket: "/run/agent.sock"}); err != nil {
+		t.Fatal(err)
+	}
+	got, err := Load(path)
+	if err != nil || got.AgentSocket != "/run/agent.sock" || got.Version != Version {
+		t.Fatalf("Load = %+v, %v", got, err)
+	}
+}
+
+// A relative agent_socket is a load error, not a path to guess at: the relay
+// would dial it against whatever directory it runs in.
+func TestLoadRefusesRelativeAgentSocket(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "c.json")
+	for _, rel := range []string{"agent.sock", "./agent.sock", "~/agent.sock"} {
+		if err := os.WriteFile(path, []byte(`{"version":1,"agent":["a"],"agent_socket":"`+rel+`"}`), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		_, err := Load(path)
+		if err == nil || !strings.Contains(err.Error(), "absolute") {
+			t.Fatalf("%q: Load = %v, want the absolute-path error", rel, err)
+		}
 	}
 }
 

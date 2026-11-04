@@ -183,12 +183,12 @@ func (b *Bridge) relayHelp() string {
 }
 
 // A throwaway session gets the agent's commands before any chat writes.
-func (b *Bridge) probeCommands(ctx context.Context) {
+func (b *Bridge) probeCommands(ctx context.Context, conn *acp.ClientConn) {
 	if !b.hasMenu() {
 		return
 	}
 	b.setAgentCommands(ctx, nil)
-	if _, err := b.conn.NewSession(ctx, acp.NewSessionRequest{Cwd: b.Cwd, MCPServers: []acp.MCPServer{}}); err != nil {
+	if _, err := conn.NewSession(ctx, acp.NewSessionRequest{Cwd: b.Cwd, MCPServers: []acp.MCPServer{}}); err != nil {
 		b.Logger.Warn("command probe session failed", "err", err)
 	}
 }

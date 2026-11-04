@@ -11,6 +11,8 @@ import (
 	"net"
 	"os"
 	"time"
+
+	"github.com/invokr-agent/agent-relay/internal/peer"
 )
 
 const (
@@ -31,7 +33,7 @@ func Dial(network, path string) (net.Conn, error) {
 	uc, ok := conn.(*net.UnixConn)
 	uid := -1
 	if ok {
-		uid, err = peerUID(uc)
+		uid, err = peer.UID(uc)
 	}
 	if err != nil || uid != os.Getuid() {
 		_ = conn.Close()

@@ -18,15 +18,18 @@ import (
 const Version = 1
 
 type Config struct {
-	Version   int       `json:"version"`
-	Agent     []string  `json:"agent"` // argv, run without a shell
-	Cwd       string    `json:"cwd,omitempty"`
-	Store     string    `json:"store,omitempty"`
-	AuditLog  string    `json:"audit_log,omitempty"`
-	RateLimit int       `json:"rate_limit,omitempty"` // messages per chat per minute
-	Telegram  *Telegram `json:"telegram,omitempty"`
-	Signal    *Signal   `json:"signal,omitempty"`
-	Matrix    *Matrix   `json:"matrix,omitempty"`
+	Version int      `json:"version"`
+	Agent   []string `json:"agent"` // argv, run without a shell
+	// AgentSocket is a Unix socket an already-running ACP agent listens on; when
+	// it is live the relay talks to that instead of spawning Agent.
+	AgentSocket string    `json:"agent_socket,omitempty"`
+	Store       string    `json:"store,omitempty"`
+	Cwd         string    `json:"cwd,omitempty"`
+	AuditLog    string    `json:"audit_log,omitempty"`
+	RateLimit   int       `json:"rate_limit,omitempty"` // messages per chat per minute
+	Telegram    *Telegram `json:"telegram,omitempty"`
+	Signal      *Signal   `json:"signal,omitempty"`
+	Matrix      *Matrix   `json:"matrix,omitempty"`
 }
 
 // Telegram's bot token is a secret, kept out of this file.
@@ -90,6 +93,11 @@ func Load(path string) (Config, error) {
 	}
 	if cfg.Version == 0 {
 		migrate(&cfg, path)
+	}
+	// A relative socket path would be dialled against whatever directory the
+	// relay runs in, so it is refused rather than guessed at.
+	if cfg.AgentSocket != "" && !filepath.IsAbs(cfg.AgentSocket) {
+		return cfg, fmt.Errorf(`%s: agent_socket must be an absolute path, e.g. "/run/user/1000/agent.sock"`, path)
 	}
 	cfg.Version = Version
 	return cfg, nil
