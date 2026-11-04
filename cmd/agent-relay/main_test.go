@@ -78,7 +78,7 @@ func TestConnectorSpawnFallbackIsNotRelayed(t *testing.T) {
 	bridge := &relay.Bridge{Logger: slog.New(slog.DiscardHandler), Cwd: dir}
 	cfg := config.Config{Agent: []string{"cat"},
 		AgentSocket: filepath.Join(dir, "gone.sock")}
-	connect := agentConnector(bridge, cfg)
+	connect := agentConnector(bridge, cfg, func(string) error { return nil })
 	bridge.Relayed = true // as it is when Run re-dialls a socket agent that went away
 	conn, label, err := connect(context.Background())
 	if err != nil {
@@ -93,35 +93,62 @@ func TestConnectorSpawnFallbackIsNotRelayed(t *testing.T) {
 	}
 }
 
-// The transport a relay reached its agent over is what it records in the lock,
-// so `agent-relay status` can show it: the socket when a live agent answers
-// there, the spawned argv otherwise.
-func TestTransportLabel(t *testing.T) {
+// What the lock says about the agent is what this relay reached, not what it
+// guessed at start: the connector records the label, and a live socket is not
+// dialled for the label alone - the agent on it sees each probe as a connection
+// opening and closing, and a probe can name a socket the connector refuses.
+func TestLockLabelComesFromTheReach(t *testing.T) {
 	dir := t.TempDir()
-	live := filepath.Join(dir, "agent.sock")
-	l, err := net.Listen("unix", live)
+	t.Setenv("XDG_STATE_HOME", dir)
+	sock := filepath.Join(dir, "agent.sock")
+	l, err := net.Listen("unix", sock)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer func() { _ = l.Close() }()
-	cfg := config.Config{Agent: []string{"my-agent", "acp"}, AgentSocket: live}
-	if got := agentTransport(cfg); got != "socket "+live {
-		t.Fatalf("live socket: %q", got)
+	var dialled = make(chan int, 4) // every connection made to this socket, counted
+	go func() {
+		for n := 1; ; n++ {
+			if _, err := l.Accept(); err != nil {
+				return
+			}
+			dialled <- n
+		}
+	}()
+	release, record, err := instance.Acquire(instance.Info{PID: os.Getpid(), Cwd: dir,
+		Mode: "foreground", Agent: notReached})
+	if err != nil {
+		t.Fatal(err)
 	}
-	cfg.AgentSocket = filepath.Join(dir, "gone.sock")
-	if got := agentTransport(cfg); got != "spawned my-agent" {
-		t.Fatalf("no agent on the socket: %q", got)
+	defer release()
+	select {
+	case n := <-dialled:
+		t.Fatalf("the socket took %d connections before the relay reached an agent", n)
+	default:
 	}
-	cfg.AgentSocket = ""
-	if got := agentTransport(cfg); got != "spawned my-agent" {
-		t.Fatalf("no agent_socket configured: %q", got)
+	bridge := &relay.Bridge{Logger: slog.New(slog.DiscardHandler), Cwd: dir}
+	cfg := config.Config{Agent: []string{"my-agent", "acp"}, AgentSocket: sock}
+	connect := agentConnector(bridge, cfg, record)
+	conn, label, err := connect(context.Background())
+	if err != nil {
+		t.Fatalf("reach: %v", err)
+	}
+	defer func() { _ = conn.Close() }()
+	if label != "socket "+sock {
+		t.Fatalf("label = %q", label)
+	}
+	if n := <-dialled; n != 1 {
+		t.Fatalf("the socket took %d connections, want the one the reach made", n)
+	}
+	if info, ok, err := instance.Running(); !ok || err != nil || info.Agent != "socket "+sock {
+		t.Fatalf("the lock says %q, want the transport reached", info.Agent)
 	}
 }
 
 // status names the transport, taken from the lock file.
 func TestStatusShowsTransport(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
-	release, err := instance.Acquire(instance.Info{PID: 42, Cwd: "/a", Mode: "detached", Agent: "socket /run/user/1000/agent.sock"})
+	release, _, err := instance.Acquire(instance.Info{PID: 42, Cwd: "/a", Mode: "detached", Agent: "socket /run/user/1000/agent.sock"})
 	if err != nil {
 		t.Fatal(err)
 	}

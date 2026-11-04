@@ -99,7 +99,7 @@ func run(path, cwd string, logger *slog.Logger) error {
 		return err
 	}
 	cfg.Cwd = cmp.Or(cwd, cfg.Cwd)
-	release, err := instance.Acquire(instance.Info{PID: os.Getpid(), Cwd: cfg.Cwd, Mode: runMode(), Agent: agentTransport(cfg), Started: time.Now()})
+	release, record, err := instance.Acquire(instance.Info{PID: os.Getpid(), Cwd: cfg.Cwd, Mode: runMode(), Agent: notReached, Started: time.Now()})
 	if err != nil {
 		return err
 	}
@@ -142,44 +142,49 @@ func run(path, cwd string, logger *slog.Logger) error {
 	}
 	logger.Info("agent-relay starting", info...)
 	bridge := &relay.Bridge{Store: store, Clients: clients, Logger: logger, Cwd: cfg.Cwd, RateLimit: cfg.RateLimit, Version: version, Notice: notice, Audit: slog.New(slog.NewJSONHandler(audit, nil))}
-	return bridge.Run(ctx, agentConnector(bridge, cfg))
+	return bridge.Run(ctx, agentConnector(bridge, cfg, record))
 }
 
-// agentTransport labels how this relay reaches its agent, for the lock file and
-// so for `agent-relay status`: the socket when it is trusted and live, the
-// configured argv otherwise. The probe connection is closed at once — an agent
-// that serves a socket sees it open and close — and the connector logs why a
-// configured socket was refused.
-func agentTransport(cfg config.Config) string {
-	if cfg.AgentSocket != "" {
-		if sock, err := relay.DialAgent(cfg.AgentSocket); err == nil {
-			defer func() { _ = sock.Close() }()
-			return "socket " + cfg.AgentSocket
-		}
-	}
-	return "spawned " + cfg.Agent[0]
-}
+// notReached is what the lock says about the agent until the relay reaches one.
+// Only the connector knows which agent it reached, and guessing early meant
+// dialling the socket for the label alone: a stray connection the agent sees
+// open and close, for a socket that connector might then refuse.
+const notReached = "not reached yet"
 
 // agentConnector reaches the agent: an agent already listening on the configured
 // socket when that socket passes DialAgent's trust checks and answers, and the
 // configured argv otherwise. Run calls it again when a relayed agent goes away,
 // so the choice is re-made then: a socket that has gone gives way to a spawn.
-func agentConnector(bridge *relay.Bridge, cfg config.Config) relay.Connector {
+// Each reach records the label it came in on, so the lock - and `agent-relay
+// status` with it - names the agent this relay is talking to now.
+func agentConnector(bridge *relay.Bridge, cfg config.Config, record func(agent string) error) relay.Connector {
 	return func(ctx context.Context) (conn *acp.ClientConn, label string, err error) {
+		// The label travels with the reach that made it, so the lock and `status`
+		// name the agent this relay is talking to now; a lock that will not take
+		// it is a log line, not a failed start.
+		say := func(agent string) {
+			if e := record(agent); e != nil {
+				bridge.Logger.Warn("agent transport not recorded in the lock", "err", e)
+			}
+		}
 		if path := cfg.AgentSocket; path != "" {
 			sock, derr := relay.DialAgent(path)
 			if derr == nil {
 				bridge.Relayed = true // losing this agent is not fatal: it can be dialled again
-				return acp.Connect(ctx, bridge, sock, sock), "socket " + path, nil
+				label = "socket " + path
+				say(label)
+				return acp.Connect(ctx, bridge, sock, sock), label, nil
 			}
 			bridge.Logger.Warn("agent socket not used", "socket", path, "err", derr)
 		}
 		bridge.Relayed = false // a spawned agent cannot be re-dialled: its exit ends Run
+		label = "spawned " + cfg.Agent[0]
+		say(label)
 		agent := exec.CommandContext(ctx, cfg.Agent[0], cfg.Agent[1:]...)
 		agent.Dir, agent.Stderr = cfg.Cwd, os.Stderr
 		agent.Env = agentEnv(os.Environ())
 		conn, err = acp.Spawn(ctx, bridge, agent)
-		return conn, "spawned " + cfg.Agent[0], err
+		return conn, label, err
 	}
 }
 
