@@ -1,4 +1,6 @@
-package signalrpc
+//go:build darwin
+
+package peer
 
 import (
 	"net"
