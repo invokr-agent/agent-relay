@@ -142,16 +142,25 @@ func run(path, cwd string, logger *slog.Logger) error {
 	}
 	logger.Info("agent-relay starting", info...)
 	bridge := &relay.Bridge{Store: store, Clients: clients, Logger: logger, Cwd: cfg.Cwd, RateLimit: cfg.RateLimit, Version: version, Notice: notice, Audit: slog.New(slog.NewJSONHandler(audit, nil))}
-	return bridge.Run(ctx, spawnAgent(bridge, cfg))
+	return bridge.Run(ctx, agentConnector(bridge, cfg))
 }
 
-// spawnAgent reaches the agent by running the configured argv. The relay
-// cannot re-dial a spawned agent, so losing it still ends Run.
-func spawnAgent(bridge *relay.Bridge, cfg config.Config) relay.Connector {
+// agentConnector reaches the agent: an agent already listening on the configured
+// socket when that socket passes DialAgent's trust checks and answers, and the
+// configured argv otherwise. Run calls it again when a relayed agent goes away,
+// so the choice is re-made then: a socket that has gone gives way to a spawn.
+func agentConnector(bridge *relay.Bridge, cfg config.Config) relay.Connector {
 	return func(ctx context.Context) (conn *acp.ClientConn, label string, err error) {
+		if path := cfg.AgentSocket; path != "" {
+			sock, derr := relay.DialAgent(path)
+			if derr == nil {
+				bridge.Relayed = true // losing this agent is not fatal: it can be dialled again
+				return acp.Connect(ctx, bridge, sock, sock), "socket " + path, nil
+			}
+			bridge.Logger.Warn("agent socket not used", "socket", path, "err", derr)
+		}
 		agent := exec.CommandContext(ctx, cfg.Agent[0], cfg.Agent[1:]...)
-		agent.Dir = cfg.Cwd
-		agent.Stderr = os.Stderr
+		agent.Dir, agent.Stderr = cfg.Cwd, os.Stderr
 		agent.Env = agentEnv(os.Environ())
 		conn, err = acp.Spawn(ctx, bridge, agent)
 		return conn, "spawned " + cfg.Agent[0], err

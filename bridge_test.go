@@ -457,7 +457,7 @@ func socketAgent(t *testing.T, path string) *os.Process {
 	// The child creates path when it starts listening: dial it only once it is
 	// there, or the bridge sees no socket and spawns instead.
 	if !listened(path) {
-		t.Fatal("the socket agent never listened on "+path)
+		t.Fatal("the socket agent never listened on " + path)
 	}
 	t.Cleanup(func() {
 		_ = cmd.Process.Kill()
