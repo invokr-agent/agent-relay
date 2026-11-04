@@ -94,6 +94,11 @@ func Load(path string) (Config, error) {
 	if cfg.Version == 0 {
 		migrate(&cfg, path)
 	}
+	// A relative socket path would be dialled against whatever directory the
+	// relay runs in, so it is refused rather than guessed at.
+	if cfg.AgentSocket != "" && !filepath.IsAbs(cfg.AgentSocket) {
+		return cfg, fmt.Errorf(`%s: agent_socket must be an absolute path, e.g. "/run/user/1000/agent.sock"`, path)
+	}
 	cfg.Version = Version
 	return cfg, nil
 }

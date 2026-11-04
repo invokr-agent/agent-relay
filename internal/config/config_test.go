@@ -49,6 +49,21 @@ func TestAgentSocketOptional(t *testing.T) {
 	}
 }
 
+// A relative agent_socket is a load error, not a path to guess at: the relay
+// would dial it against whatever directory it runs in.
+func TestLoadRefusesRelativeAgentSocket(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "c.json")
+	for _, rel := range []string{"agent.sock", "./agent.sock", "~/agent.sock"} {
+		if err := os.WriteFile(path, []byte(`{"version":1,"agent":["a"],"agent_socket":"`+rel+`"}`), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		_, err := Load(path)
+		if err == nil || !strings.Contains(err.Error(), "absolute") {
+			t.Fatalf("%q: Load = %v, want the absolute-path error", rel, err)
+		}
+	}
+}
+
 func TestLoadMigratesVersion0(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "c.json")
 	v0 := `{"agent":["a"],"telegram":{"token":"tok","allowed_chat_ids":[42,-100]}}`

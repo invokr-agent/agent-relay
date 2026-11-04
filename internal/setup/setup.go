@@ -47,8 +47,12 @@ type Answers map[string]string
 var agentField = Field{Key: "agent", Label: "Agent command", Type: "list", Help: `ACP agent argv, run without a shell: a JSON array (e.g. ["my-agent","acp"]); interactive setup splits on spaces`}
 
 // An agent already running can be reached over the Unix socket it listens on
-// instead of spawned; the answer is optional, and empty means spawn.
-var agentSocketField = Field{Key: "agent_socket", Label: "Agent socket", Help: "Unix socket an already-running ACP agent listens on (absolute path); empty: spawn the agent command", Pattern: `^(/[[:graph:]]+)?$`}
+// instead of spawned; the answer is optional, and empty means keep what the
+// config already says. "-" clears a stored socket, moving the relay back to
+// spawning the agent command.
+var agentSocketField = Field{Key: "agent_socket", Label: "Agent socket",
+	Help:    `Unix socket an already-running ACP agent listens on (absolute path); '-' clears a stored one, empty: keep it`,
+	Pattern: `^(-|/[[:graph:]]+)?$`}
 
 var descriptors = []Descriptor{
 	{Client: "telegram", Pairing: "code", Notice: "Telegram is not end-to-end encrypted; prefer Signal for sensitive work.",
@@ -178,9 +182,12 @@ func Apply(ctx context.Context, path, client string, a Answers) error {
 	} else if len(cfg.Agent) == 0 {
 		return &FieldError{"agent", "is required"}
 	}
-	// agent_socket is optional: an empty answer leaves the stored one alone.
-	if a["agent_socket"] != "" {
-		cfg.AgentSocket = a["agent_socket"]
+	// agent_socket is optional: an empty answer leaves the stored one alone,
+	// "-" clears it (the relay spawns the agent command again).
+	if s := a["agent_socket"]; s == "-" {
+		cfg.AgentSocket = ""
+	} else if s != "" {
+		cfg.AgentSocket = s
 	}
 	return save(path, &cfg, client, a)
 }

@@ -203,8 +203,9 @@ func TestApplyRejectsUnknownAndOverflow(t *testing.T) {
 	}
 }
 
-// agent_socket is an optional answer: stored as given, and a path that is not
-// absolute is refused rather than guessed at.
+// agent_socket is an optional answer: stored as given, a path that is not
+// absolute refused rather than guessed at, an empty answer keeping the stored
+// one and "-" clearing it.
 func TestApplyAgentSocket(t *testing.T) {
 	keyring.MockInit()
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
@@ -231,6 +232,13 @@ func TestApplyAgentSocket(t *testing.T) {
 	}
 	if cfg, _ = config.Load(path); cfg.AgentSocket != "/run/user/1000/agent.sock" {
 		t.Fatalf("empty answer cleared the stored socket: %q", cfg.AgentSocket)
+	}
+	// "-" is the explicit clear: the relay goes back to spawning its agent.
+	if Apply(context.Background(), path, "telegram", Answers{"token": token, "agent_socket": "-"}) != nil {
+		t.Fatal("the clear answer rejected")
+	}
+	if cfg, _ = config.Load(path); cfg.AgentSocket != "" {
+		t.Fatalf("after \"-\": agent_socket = %q, want it cleared", cfg.AgentSocket)
 	}
 }
 
