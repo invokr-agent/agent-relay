@@ -11,7 +11,7 @@ import (
 
 func TestSaveLoadRoundTripAndModes(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "agent-relay", "config.json")
-	want := Config{Agent: []string{"my-agent", "acp"}, Telegram: &Telegram{AllowedUserIDs: []int64{7}}}
+	want := Config{Agent: []string{"my-agent", "acp"}, AgentSocket: "/run/user/1000/agent.sock", Telegram: &Telegram{AllowedUserIDs: []int64{7}}}
 	if err := Save(path, want); err != nil {
 		t.Fatal(err)
 	}
@@ -22,6 +22,29 @@ func TestSaveLoadRoundTripAndModes(t *testing.T) {
 	}
 	got, err := Load(path)
 	if err != nil || got.Version != Version || got.Telegram.AllowedUserIDs[0] != 7 {
+		t.Fatalf("Load = %+v, %v", got, err)
+	}
+	if got.AgentSocket != "/run/user/1000/agent.sock" {
+		t.Fatalf("agent_socket = %q", got.AgentSocket)
+	}
+}
+
+// agent_socket is optional: an unset one stays out of the file, and a file
+// without it loads as today.
+func TestAgentSocketOptional(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "c.json")
+	if err := Save(path, Config{Agent: []string{"a"}}); err != nil {
+		t.Fatal(err)
+	}
+	data, _ := os.ReadFile(path)
+	if strings.Contains(string(data), "agent_socket") {
+		t.Fatalf("unset agent_socket written: %s", data)
+	}
+	if err := Save(path, Config{Agent: []string{"a"}, AgentSocket: "/run/agent.sock"}); err != nil {
+		t.Fatal(err)
+	}
+	got, err := Load(path)
+	if err != nil || got.AgentSocket != "/run/agent.sock" || got.Version != Version {
 		t.Fatalf("Load = %+v, %v", got, err)
 	}
 }
