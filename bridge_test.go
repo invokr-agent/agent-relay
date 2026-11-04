@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -24,8 +25,17 @@ import (
 
 const fakeAgentEnv = "AGENT_RELAY_FAKE_AGENT"
 
+// fakeSocketEnv makes the fake agent listen on a Unix socket instead of
+// talking over its stdin/stdout; strictEnv makes it refuse sessions it did
+// not create, as an agent does after a restart.
+const fakeSocketEnv = "AGENT_RELAY_FAKE_SOCKET"
+const strictEnv = "AGENT_RELAY_FAKE_STRICT"
+
 func TestMain(m *testing.M) {
 	if os.Getenv(fakeAgentEnv) == "1" {
+		if sock := os.Getenv(fakeSocketEnv); sock != "" {
+			os.Exit(serveSocket(sock))
+		}
 		agent := &fakeAgent{conn: acp.NewAgentConn(os.Stdin, os.Stdout)}
 		agent.conn.Serve(context.Background(), agent)
 		<-agent.conn.Done()
@@ -34,9 +44,27 @@ func TestMain(m *testing.M) {
 	os.Exit(m.Run())
 }
 
+// serveSocket serves one agent per connection and stays up until the
+// process dies: that is what lets a test kill a socket agent mid-turn.
+func serveSocket(path string) int {
+	l, err := net.Listen("unix", path)
+	if err != nil {
+		return 1
+	}
+	for {
+		c, err := l.Accept()
+		if err != nil {
+			return 0
+		}
+		agent := &fakeAgent{conn: acp.NewAgentConn(c, c)}
+		go agent.conn.Serve(context.Background(), agent)
+	}
+}
+
 type fakeAgent struct {
 	conn     *acp.AgentConn
 	sessions atomic.Int64
+	known    sync.Map // sessions this agent created; strict mode rejects the rest
 }
 
 func (a *fakeAgent) Initialize(_ context.Context, req acp.InitializeRequest) (acp.InitializeResponse, error) {
@@ -49,6 +77,7 @@ func (a *fakeAgent) Authenticate(context.Context, acp.AuthenticateRequest) (acp.
 
 func (a *fakeAgent) NewSession(ctx context.Context, _ acp.NewSessionRequest) (acp.NewSessionResponse, error) {
 	id := acp.SessionID(fmt.Sprint("s", a.sessions.Add(1)))
+	a.known.Store(id, true)
 	err := a.conn.SessionUpdate(ctx, acp.SessionNotification{SessionID: id, Update: acp.SessionUpdate{
 		AvailableCommandsUpdate: &acp.AvailableCommandsUpdate{AvailableCommands: fakeCommands}}})
 	return acp.NewSessionResponse{SessionID: id}, err
@@ -61,8 +90,14 @@ var fakeCommands = []acp.AvailableCommand{
 
 func (a *fakeAgent) Cancel(context.Context, acp.CancelNotification) error { return nil }
 
-// LoadSession replays history that must not reach the chat again.
+// LoadSession replays history that must not reach the chat again. Strict
+// mode stands for an agent that no longer knows the session it is asked to
+// load.
 func (a *fakeAgent) LoadSession(ctx context.Context, req acp.LoadSessionRequest) (acp.LoadSessionResponse, error) {
+	_, known := a.known.Load(req.SessionID)
+	if os.Getenv(strictEnv) != "" && !known {
+		return acp.LoadSessionResponse{}, errors.New("unknown session")
+	}
 	return acp.LoadSessionResponse{}, a.say(ctx, req.SessionID, "replayed history")
 }
 
@@ -75,6 +110,8 @@ func (a *fakeAgent) Prompt(ctx context.Context, req acp.PromptRequest) (acp.Prom
 	case "wait":
 		<-ctx.Done()
 		return acp.PromptResponse{}, ctx.Err()
+	case "die":
+		os.Exit(0) // the agent process itself goes away
 	case "run":
 		perm, err := a.conn.RequestPermission(ctx, acp.RequestPermissionRequest{SessionID: req.SessionID,
 			ToolCall: acp.ToolCallUpdate{ToolCallID: "t1", Title: "rm -rf build", Kind: acp.ToolKindExecute, RawInput: json.RawMessage(`{"cmd":"rm -rf build"}`)},
@@ -148,7 +185,7 @@ func (f *fakeClient) next(t *testing.T) string {
 }
 
 // startBridge runs a bridge on store against a fresh fake agent process.
-func startBridge(t *testing.T, store string, client *fakeClient, opts ...func(*Bridge)) {
+func startBridge(t *testing.T, store string, client *fakeClient, opts ...func(*Bridge)) *running {
 	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
 	s, err := NewStore(store)
@@ -161,9 +198,40 @@ func startBridge(t *testing.T, store string, client *fakeClient, opts ...func(*B
 	}
 	cmd := exec.Command(os.Args[0], "-test.run=^$")
 	cmd.Env = append(os.Environ(), fakeAgentEnv+"=1")
-	done := make(chan struct{})
-	go func() { _ = b.Run(ctx, cmd); close(done) }()
-	t.Cleanup(func() { cancel(); <-done })
+	r := &running{b: b}
+	r.done = make(chan struct{})
+	go func() { r.err = b.Run(ctx, spawnConnector(b, cmd)); close(r.done) }()
+	t.Cleanup(func() { cancel(); <-r.done })
+	return r
+}
+
+// running is a bridge whose Run has not come back yet.
+type running struct {
+	b    *Bridge
+	done chan struct{}
+	err  error
+}
+
+// stopped waits for Run to return, and fails the test when it has not: a
+// socket transport is expected to keep running.
+func (r *running) stopped(t *testing.T) error {
+	t.Helper()
+	select {
+	case <-r.done:
+		return r.err
+	case <-time.After(5 * time.Second):
+		t.Fatal("Run is still running")
+		return nil
+	}
+}
+
+// spawnConnector reaches the fake agent by re-running this binary, as a relay
+// does for an agent it spawned and cannot re-dial.
+func spawnConnector(b *Bridge, cmd *exec.Cmd) Connector {
+	return func(ctx context.Context) (conn *acp.ClientConn, label string, err error) {
+		conn, err = acp.Spawn(ctx, b, cmd)
+		return conn, "spawned " + os.Args[0], err
+	}
 }
 
 func TestBridgeChatTurn(t *testing.T) {
@@ -341,7 +409,7 @@ func TestBridgeListenerStopped(t *testing.T) {
 	cmd := exec.Command(os.Args[0], "-test.run=^$")
 	cmd.Env = append(os.Environ(), fakeAgentEnv+"=1")
 	close(chat.in)
-	err = b.Run(context.Background(), cmd)
+	err = b.Run(context.Background(), spawnConnector(b, cmd))
 	if err == nil || !strings.Contains(err.Error(), "fake listener stopped") {
 		t.Fatalf("Run = %v", err)
 	}
@@ -375,5 +443,116 @@ func TestBridgePermissionOutsideTurnDenied(t *testing.T) {
 		if asked := len(client.asked); (approver == "") != (asked == 0) {
 			t.Fatalf("%s: asked %d times", name, asked)
 		}
+	}
+}
+
+// socketAgent runs the fake agent listening on path, for the bridge to dial.
+func socketAgent(t *testing.T, path string) *os.Process {
+	t.Helper()
+	cmd := exec.Command(os.Args[0], "-test.run=^$")
+	cmd.Env = append(os.Environ(), fakeAgentEnv+"=1", fakeSocketEnv+"="+path)
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	// The child creates path when it starts listening: dial it only once it is
+	// there, or the bridge sees no socket and spawns instead.
+	if !listened(path) {
+		t.Fatal("the socket agent never listened on "+path)
+	}
+	t.Cleanup(func() {
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
+	})
+	return cmd.Process
+}
+
+// listened waits up to 10 s for path to appear as a socket file.
+func listened(path string) bool {
+	for deadline := time.Now().Add(10 * time.Second); ; {
+		if st, err := os.Lstat(path); err == nil && st.Mode()&os.ModeSocket != 0 {
+			return true
+		}
+		if time.Now().After(deadline) {
+			return false
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// A spawned agent that exits still ends Run: only a transport the relay can
+// re-dial survives.
+func TestBridgeSpawnedAgentExitEndsRun(t *testing.T) {
+	chat := newFakeClient(true)
+	r := startBridge(t, filepath.Join(t.TempDir(), "sessions.json"), chat)
+	chat.say("die")
+	err := r.stopped(t)
+	if err == nil || !strings.Contains(err.Error(), "agent exited") {
+		t.Fatalf("Run = %v, want the agent exit to end it", err)
+	}
+}
+
+// A socket agent that goes away mid-turn is replaced: Run keeps serving, the
+// chat hears once that its answer is lost, and a stored session the new agent
+// cannot load gives way to a new one.
+func TestBridgeReconnectsAfterSocketAgentGoesAway(t *testing.T) {
+	dir := t.TempDir()
+	sock := filepath.Join(dir, "agent.sock")
+	s, err := NewStore(filepath.Join(dir, "sessions.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	chat := newFakeClient(true)
+	b := &Bridge{Store: s, Clients: []Client{chat}, Logger: slog.New(slog.NewTextHandler(os.Stderr, nil)), Cwd: dir}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	agent := socketAgent(t, sock)
+	var dials int
+	connect := Connector(func(ctx context.Context) (conn *acp.ClientConn, label string, err error) {
+		dials++
+		c, derr := net.Dial("unix", sock)
+		if derr == nil {
+			b.Relayed = true
+			return acp.Connect(ctx, b, c, c), "socket " + sock, nil
+		}
+		t.Log("socket dial failed", derr)
+		b.Relayed = false
+		cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=^$")
+		cmd.Env = append(os.Environ(), fakeAgentEnv+"=1", strictEnv+"=1")
+		var spawnErr error
+		conn, spawnErr = acp.Spawn(ctx, b, cmd)
+		return conn, "spawned " + os.Args[0], spawnErr
+	})
+	done := make(chan struct{})
+	var runErr error
+	go func() { runErr = b.Run(ctx, connect); close(done) }()
+	defer func() { cancel(); <-done }()
+
+	chat.say("hi")
+	if got := chat.next(t); got != "echo: hi (s1)" {
+		t.Fatalf("the socket agent replied %q", got)
+	}
+	chat.say("wait") // a turn in flight when the agent goes away
+	time.Sleep(100 * time.Millisecond)
+	_ = agent.Kill()
+	var notice string
+	for i := 0; i < 3; i++ {
+		if notice = chat.next(t); strings.Contains(notice, "agent restarted") {
+			break
+		}
+	}
+	if !strings.Contains(notice, "agent restarted") {
+		t.Fatalf("no reconnect notice reached the chat: %q", notice)
+	}
+	chat.say("hi")
+	if got := chat.next(t); got != "echo: hi (s1)" {
+		t.Fatalf("after reconnecting: %q", got)
+	}
+	if dials != 2 {
+		t.Fatalf("connect called %d times", dials)
+	}
+	select {
+	case <-done:
+		t.Fatalf("Run returned: %v", runErr)
+	default:
 	}
 }

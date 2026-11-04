@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"os/exec"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -16,11 +15,13 @@ import (
 )
 
 const (
-	inboxCap        = 8
-	approvalTimeout = 2 * time.Minute
-	typingRefresh   = 4 * time.Second
-	rateWindow      = time.Minute
-	auditDetailsMax = 1 << 10
+	inboxCap         = 8
+	reconnectWait    = time.Second
+	reconnectWaitMax = 30 * time.Second
+	approvalTimeout  = 2 * time.Minute
+	typingRefresh    = 4 * time.Second
+	rateWindow       = time.Minute
+	auditDetailsMax  = 1 << 10
 )
 
 // Bridge connects chat clients to one ACP agent. Each chat gets its own
@@ -38,7 +39,11 @@ type Bridge struct {
 	// Notice, when it returns non-empty, is appended once to each chat's next reply.
 	Notice func() string
 
+	// Relayed is set by Connect before it returns a socket connection: losing an
+	// agent the relay can re-dial is not fatal, unlike losing one it spawned.
+	Relayed   bool
 	conn      *acp.ClientConn
+	liveConn  *acp.ClientConn // the connection Run's defer closes; Run's goroutine only
 	canLoad   bool
 	chats     map[string]*chat // chat key → chat; Run's goroutine only
 	sessions  sync.Map         // acp.SessionID → *chat
@@ -56,6 +61,7 @@ type chat struct {
 	session  acp.SessionID
 	approver string // SenderID of the prompt in flight; "" between prompts
 	turn     int64  // bumped as each prompt starts and ends: an answer outliving its prompt is refused
+	lost     bool   // a prompt's answer never arrived: the reconnect notice is owed to it
 	window   time.Time
 	count    int // messages since window; Run's goroutine only
 	mu       sync.Mutex
@@ -76,46 +82,132 @@ func (c *chat) set(f func()) {
 	f()
 }
 
-// Run spawns agent, then serves every client until ctx ends.
-func (b *Bridge) Run(ctx context.Context, agent *exec.Cmd) error {
-	if b.Logger == nil {
-		b.Logger = slog.Default()
-	}
-	if len(b.Clients) == 0 {
-		return errors.New("messaging: no clients configured")
-	}
-	conn, err := acp.Spawn(ctx, b, agent)
-	if err != nil {
-		return fmt.Errorf("messaging: start agent: %w", err)
-	}
-	defer func() { _ = conn.Close() }()
-	if err := b.initialize(ctx, conn); err != nil {
-		return err
-	}
-	b.probeCommands(ctx)
+// Connector reaches the agent and labels how it did ("socket <path>" or
+// "spawned <argv0>"); Run logs the label and reconnects through the same
+// connector when a relayed agent goes away.
+type Connector func(ctx context.Context) (conn *acp.ClientConn, label string, err error)
+
+// Run reaches the agent through connect, then serves every client until ctx
+// ends. A relayed (socket) agent that goes away is reached again; a spawned
+// agent exiting still ends Run.
+func (b *Bridge) Run(ctx context.Context, connect Connector) error {
 	inbound, stopped, err := b.listen(ctx)
 	if err != nil {
 		return err
 	}
+	// Closed once on return; a connection lost to a reconnect is closed there
+	// instead, so the defers cannot stack one per connection.
+	defer b.closeLiveConn()
+	for backoff := time.Duration(0); ; {
+		conn, label, reachErr := b.reach(ctx, connect)
+		if reachErr != nil {
+			return reachErr
+		}
+		// serveChats routes this agent's messages until it ends, ctx ends, or a
+		// client's listener dies; it ends Run when the answer is not "carry on".
+		if serveErr := b.serveChats(ctx, conn, inbound, stopped); serveErr != nil {
+			return serveErr
+		}
+		if ctx.Err() != nil {
+			return nil
+		}
+		b.liveConn = nil
+		b.announceLostAgent(conn, label)
+		_ = conn.Close()
+		if !b.pauseBeforeRedial(ctx, &backoff) {
+			return nil
+		}
+	}
+}
+
+// reach dials the agent through connect, initializes it and probes its
+// commands, logging the transport it came in on; Run calls it once per
+// connection, including when re-dialling a socket agent that went away.
+func (b *Bridge) reach(ctx context.Context, connect Connector) (*acp.ClientConn, string, error) {
+	conn, label, err := connect(ctx)
+	if err != nil {
+		return nil, "", fmt.Errorf("messaging: start agent: %w", err)
+	}
+	b.liveConn = conn
+	if initErr := b.initialize(ctx, conn); initErr != nil {
+		return conn, label, initErr
+	}
+	b.Logger.Info("agent reached", "transport", label)
+	// The command probe opens a throwaway session: on every connection, so
+	// a replacement agent's commands replace the ones the old agent had.
+	b.probeCommands(ctx)
+	return conn, label, nil
+}
+
+// closeLiveConn closes the agent connection still live when Run returns. A
+// connection lost to a reconnect is closed there instead, so Run's defer
+// cannot stack one per connection.
+func (b *Bridge) closeLiveConn() {
+	if b.liveConn != nil {
+		_ = b.liveConn.Close()
+	}
+}
+
+// serveChats serves one agent connection: it routes inbound messages until
+// ctx ends, the agent's connection ends, or a client's listener dies. It
+// returns nil when Run may carry on - ctx ended, or a relayed agent the relay
+// can re-dial went away - and the error that ends Run in every other case.
+func (b *Bridge) serveChats(ctx context.Context, conn *acp.ClientConn,
+	inbound chan delivery, stopped chan string) error {
 	for {
 		select {
 		case <-ctx.Done():
 			return nil
-		case <-conn.Done():
-			return fmt.Errorf("messaging: agent exited: %w", conn.Err())
+		case in := <-inbound:
+			b.route(ctx, in.t, in.msg)
 		case name := <-stopped:
 			if ctx.Err() != nil {
 				return nil
 			}
 			return fmt.Errorf("messaging: %s listener stopped", name)
-		case in := <-inbound:
-			b.route(ctx, in.t, in.msg)
+		case <-conn.Done():
+			if b.Relayed {
+				return nil
+			}
+			return fmt.Errorf("messaging: agent exited: %w", conn.Err())
 		}
 	}
 }
 
+// announceLostAgent says how the agent went away and tells the chats that
+// were mid-turn, before their sessions and half answers are dropped along
+// with the agent that owned them.
+func (b *Bridge) announceLostAgent(conn *acp.ClientConn, label string) {
+	reason := conn.Err()
+	if reason == nil {
+		reason = errors.New("connection closed by the agent")
+	}
+	b.Logger.Warn("agent lost; reconnecting", "transport", label, "err", reason)
+	b.noticeChats()
+	b.resetChats()
+}
+
+// pauseBeforeRedial waits out the reconnect backoff, doubling it per lost
+// agent so a socket agent that dies on arrival cannot spin the log. False
+// means ctx ended first, so Run returns without dialling again.
+func (b *Bridge) pauseBeforeRedial(ctx context.Context, backoff *time.Duration) bool {
+	*backoff = min(max(2**backoff, reconnectWait), reconnectWaitMax)
+	select {
+	case <-ctx.Done():
+		return false
+	case <-time.After(*backoff):
+		return true
+	}
+}
+
 func (b *Bridge) initialize(ctx context.Context, conn *acp.ClientConn) error {
-	b.conn, b.chats, b.ctx = conn, map[string]*chat{}, ctx
+	if b.Logger == nil {
+		b.Logger = slog.Default()
+	}
+	b.conn, b.ctx = conn, ctx
+	if b.chats == nil {
+		b.chats = map[string]*chat{}
+	}
 	init, err := conn.Initialize(ctx, acp.InitializeRequest{ProtocolVersion: acp.V1,
 		ClientInfo: &acp.Implementation{Name: "agent-relay", Version: b.Version}})
 	if err != nil {
@@ -130,8 +222,12 @@ type delivery struct {
 	t   Client
 }
 
-// listen starts every client; stopped names a client whose listener closed.
+// listen starts every client's listener and reports, in stopped, one whose
+// channel closed; with no clients configured there is nothing to relay.
 func (b *Bridge) listen(ctx context.Context) (inbound chan delivery, stopped chan string, err error) {
+	if len(b.Clients) == 0 {
+		return nil, nil, errors.New("messaging: no clients configured")
+	}
 	inbound = make(chan delivery, 64)
 	stopped = make(chan string, len(b.Clients))
 	for _, t := range b.Clients {
@@ -249,10 +345,15 @@ func (b *Bridge) handle(ctx context.Context, c *chat, msg Inbound) error {
 	// Drop text left by an earlier failed turn so it does not lead this reply.
 	c.set(c.reply.Reset)
 	stop := b.typing(ctx, c)
-	c.set(func() { c.approver = msg.SenderID; c.turn++ })
+	c.set(func() { c.approver, c.lost, c.turn = msg.SenderID, true, c.turn+1 })
 	resp, err := b.conn.Prompt(ctx, acp.PromptRequest{SessionID: c.current(),
 		Prompt: []acp.ContentBlock{{Text: &acp.TextContent{Text: text}}}})
-	c.set(func() { c.approver = ""; c.turn++ })
+	c.set(func() {
+		c.approver, c.turn = "", c.turn+1
+		if err == nil {
+			c.lost = false // the answer arrived; nothing is owed to this chat
+		}
+	})
 	stop()
 	if err != nil {
 		return err
@@ -288,6 +389,35 @@ func (b *Bridge) newSession(ctx context.Context, c *chat) error {
 	c.set(func() { c.session = resp.SessionID })
 	b.sessions.Store(resp.SessionID, c)
 	return b.Store.SetSessionID(c.key, string(resp.SessionID))
+}
+
+// reconnectNotice is what a chat hears when its agent is replaced mid-turn:
+// that answer will not arrive.
+const reconnectNotice = "⚠️ the agent restarted mid-turn; this answer is lost. The next message starts a new session if the agent cannot load the old one."
+
+// noticeChats tells the chats whose answer is lost, before their turns are
+// dropped, so a chat whose answer arrived hears nothing new.
+func (b *Bridge) noticeChats() {
+	for _, c := range b.chats {
+		var lost bool
+		c.set(func() { lost = c.lost })
+		if lost {
+			notify(b.ctx, c.t, c.id, reconnectNotice)
+		}
+	}
+}
+
+// resetChats drops state that belonged to the agent that went away: its session
+// IDs, and any half answer. Chats reopen lazily through openSession, where a
+// stored ID that no longer loads falls back to a new session as it always has.
+func (b *Bridge) resetChats() {
+	for _, c := range b.chats {
+		b.sessions.Delete(c.current())
+		c.set(func() {
+			c.session, c.approver, c.lost, c.loading = acp.SessionID(""), "", false, false
+			c.reply.Reset()
+		})
+	}
 }
 
 func (b *Bridge) sendReply(ctx context.Context, c *chat, stop acp.StopReason) error {

@@ -38,6 +38,8 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/invokr-agent/acp"
+
 	relay "github.com/invokr-agent/agent-relay"
 	"github.com/invokr-agent/agent-relay/clients/matrix"
 	signalcli "github.com/invokr-agent/agent-relay/clients/signal"
@@ -139,12 +141,21 @@ func run(path, cwd string, logger *slog.Logger) error {
 		info = append(info, "matrix_user", m.UserID, "matrix_users", len(m.AllowedUsers))
 	}
 	logger.Info("agent-relay starting", info...)
-	agent := exec.CommandContext(ctx, cfg.Agent[0], cfg.Agent[1:]...)
-	agent.Dir = cfg.Cwd
-	agent.Stderr = os.Stderr
-	agent.Env = agentEnv(os.Environ())
 	bridge := &relay.Bridge{Store: store, Clients: clients, Logger: logger, Cwd: cfg.Cwd, RateLimit: cfg.RateLimit, Version: version, Notice: notice, Audit: slog.New(slog.NewJSONHandler(audit, nil))}
-	return bridge.Run(ctx, agent)
+	return bridge.Run(ctx, spawnAgent(bridge, cfg))
+}
+
+// spawnAgent reaches the agent by running the configured argv. The relay
+// cannot re-dial a spawned agent, so losing it still ends Run.
+func spawnAgent(bridge *relay.Bridge, cfg config.Config) relay.Connector {
+	return func(ctx context.Context) (conn *acp.ClientConn, label string, err error) {
+		agent := exec.CommandContext(ctx, cfg.Agent[0], cfg.Agent[1:]...)
+		agent.Dir = cfg.Cwd
+		agent.Stderr = os.Stderr
+		agent.Env = agentEnv(os.Environ())
+		conn, err = acp.Spawn(ctx, bridge, agent)
+		return conn, "spawned " + cfg.Agent[0], err
+	}
 }
 
 // agentEnv drops AGENT_RELAY_* so the agent cannot read relay secrets.
