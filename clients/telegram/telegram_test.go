@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -427,5 +428,62 @@ func TestNew_EmptyToken(t *testing.T) {
 	_, err := New("", nil, false)
 	if err == nil {
 		t.Fatal("expected error for empty token")
+	}
+}
+
+// The first status is sent and pinned, later ones edit it, and a restarted
+// client edits the pin its bot left instead of pinning another.
+func TestSetStatusPinsOnceThenEdits(t *testing.T) {
+	const token = "123:abc"
+	var calls []string
+	var mu sync.Mutex
+	pinned := false
+	mux := http.NewServeMux()
+	for _, method := range []string{"getChat", "sendMessage", "pinChatMessage", "editMessageText"} {
+		mux.HandleFunc("/bot"+token+"/"+method, func(w http.ResponseWriter, _ *http.Request) {
+			mu.Lock()
+			defer mu.Unlock()
+			calls = append(calls, method)
+			result := any(true)
+			switch method {
+			case "getChat":
+				chat := map[string]any{"id": 111}
+				if pinned {
+					chat["pinned_message"] = map[string]any{"message_id": 42, "from": map[string]any{"id": 123}}
+				}
+				result = chat
+			case "pinChatMessage":
+				pinned = true
+			case "sendMessage", "editMessageText":
+				result = map[string]any{"message_id": 42}
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"ok": true, "result": result})
+		})
+	}
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+	var c *Client
+	for _, step := range []struct {
+		restart bool
+		want    string
+	}{{true, "getChat sendMessage pinChatMessage"}, {false, "editMessageText"}, {true, "getChat editMessageText"}} {
+		want := step.want
+		if step.restart {
+			var err error
+			if c, err = newWithBaseURL(token, nil, false, srv.URL); err != nil {
+				t.Fatal(err)
+			}
+		}
+		mu.Lock()
+		calls = nil
+		mu.Unlock()
+		if err := c.SetStatus(context.Background(), "111", "status"); err != nil {
+			t.Fatal(err)
+		}
+		mu.Lock()
+		if got := strings.Join(calls, " "); got != want {
+			t.Fatalf("calls = %q, want %q", got, want)
+		}
+		mu.Unlock()
 	}
 }
