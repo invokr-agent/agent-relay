@@ -449,7 +449,7 @@ func TestSetStatusPinsOnceThenEdits(t *testing.T) {
 			case "getChat":
 				chat := map[string]any{"id": 111}
 				if pinned {
-					chat["pinned_message"] = map[string]any{"message_id": 42, "from": map[string]any{"id": 123}}
+					chat["pinned_message"] = map[string]any{"message_id": 42, "from": map[string]any{"id": 123}, "text": "🤖 status"}
 				}
 				result = chat
 			case "pinChatMessage":
@@ -477,7 +477,7 @@ func TestSetStatusPinsOnceThenEdits(t *testing.T) {
 		mu.Lock()
 		calls = nil
 		mu.Unlock()
-		if err := c.SetStatus(context.Background(), "111", "status"); err != nil {
+		if err := c.SetStatus(context.Background(), "111", "🤖 status"); err != nil {
 			t.Fatal(err)
 		}
 		mu.Lock()
@@ -485,5 +485,56 @@ func TestSetStatusPinsOnceThenEdits(t *testing.T) {
 			t.Fatalf("calls = %q, want %q", got, want)
 		}
 		mu.Unlock()
+	}
+}
+
+// A failed edit pins a new status only when the old one is gone; a pinned
+// message that is not a status is never adopted.
+func TestSetStatusEditFailures(t *testing.T) {
+	const token = "123:abc"
+	for _, tc := range []struct {
+		name, editErr, pinnedText, want string
+		fails                           bool
+	}{
+		{"not modified", "Bad Request: message is not modified", "🤖 old", "getChat editMessageText", false},
+		{"deleted", "Bad Request: message to edit not found", "🤖 old", "getChat editMessageText sendMessage pinChatMessage", false},
+		{"rate limited", "Too Many Requests: retry after 5", "🤖 old", "getChat editMessageText", true},
+		{"user pinned a reply", "", "a useful answer", "getChat sendMessage pinChatMessage", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var calls []string
+			var mu sync.Mutex
+			mux := http.NewServeMux()
+			for _, method := range []string{"getChat", "sendMessage", "pinChatMessage", "editMessageText"} {
+				mux.HandleFunc("/bot"+token+"/"+method, func(w http.ResponseWriter, _ *http.Request) {
+					mu.Lock()
+					calls = append(calls, method)
+					mu.Unlock()
+					reply := map[string]any{"ok": true, "result": map[string]any{"message_id": 42}}
+					switch {
+					case method == "getChat":
+						reply["result"] = map[string]any{"id": 111, "pinned_message": map[string]any{
+							"message_id": 7, "from": map[string]any{"id": 123}, "text": tc.pinnedText}}
+					case method == "editMessageText" && tc.editErr != "":
+						reply = map[string]any{"ok": false, "error_code": 400, "description": tc.editErr}
+					}
+					_ = json.NewEncoder(w).Encode(reply)
+				})
+			}
+			srv := httptest.NewServer(mux)
+			t.Cleanup(srv.Close)
+			c, err := newWithBaseURL(token, nil, false, srv.URL)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := c.SetStatus(context.Background(), "111", "🤖 new"); (err != nil) != tc.fails {
+				t.Fatalf("SetStatus err = %v, want failure %v", err, tc.fails)
+			}
+			mu.Lock()
+			defer mu.Unlock()
+			if got := strings.Join(calls, " "); got != tc.want {
+				t.Fatalf("calls = %q, want %q", got, tc.want)
+			}
+		})
 	}
 }

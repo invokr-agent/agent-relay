@@ -205,15 +205,21 @@ func (c *Client) SetTyping(ctx context.Context, chatID string, active bool) erro
 func (c *Client) SetStatus(ctx context.Context, chatID, text string) error {
 	id, ok := c.status.Load(chatID)
 	if !ok {
-		id, ok = c.pinnedByBot(ctx, chatID)
+		var err error
+		if id, ok, err = c.pinnedStatus(ctx, chatID); err != nil {
+			return err // unsure whether a status is pinned: do not pin another
+		}
 	}
 	if ok {
 		err := c.call(ctx, "editMessageText", map[string]any{"chat_id": chatID, "message_id": id, "text": text}, nil)
-		if e, isAPI := errors.AsType[*tgapi.APIError](err); err == nil || isAPI && strings.Contains(e.Description, "not modified") {
+		e, isAPI := errors.AsType[*tgapi.APIError](err)
+		switch {
+		case err == nil || isAPI && strings.Contains(e.Description, "not modified"):
 			c.status.Store(chatID, id)
 			return nil
+		case !isAPI || !strings.Contains(e.Description, "not found") && !strings.Contains(e.Description, "can't be edited"):
+			return err // rate limit, outage: retrying later beats a pile of pins
 		}
-		// Otherwise the message is gone (the user deleted it): pin a new one.
 	}
 	var m tgapi.Message
 	if err := c.call(ctx, "sendMessage", map[string]any{"chat_id": chatID, "text": text, "disable_notification": true}, &m); err != nil {
@@ -223,15 +229,23 @@ func (c *Client) SetStatus(ctx context.Context, chatID, text string) error {
 	return c.call(ctx, "pinChatMessage", map[string]any{"chat_id": chatID, "message_id": m.MessageID, "disable_notification": true}, nil)
 }
 
-func (c *Client) pinnedByBot(ctx context.Context, chatID string) (any, bool) {
+// pinnedStatus finds a status this bot pinned before a restart. The text check
+// keeps it off a bot reply the user pinned themselves.
+// shortcut: getChat sees only the newest pin, so a later pin hides the status
+// and the next restart pins another; persist the message ID if that bites.
+func (c *Client) pinnedStatus(ctx context.Context, chatID string) (any, bool, error) {
 	var chat struct {
 		Pinned *tgapi.Message `json:"pinned_message"`
 	}
-	botID, _, _ := strings.Cut(c.token, ":") // a bot token starts with the bot's user ID
-	if c.call(ctx, "getChat", map[string]any{"chat_id": chatID}, &chat) != nil || chat.Pinned == nil || chat.Pinned.From == nil {
-		return nil, false
+	if err := c.call(ctx, "getChat", map[string]any{"chat_id": chatID}, &chat); err != nil {
+		return nil, false, err
 	}
-	return chat.Pinned.MessageID, strconv.FormatInt(chat.Pinned.From.ID, 10) == botID
+	botID, _, _ := strings.Cut(c.token, ":") // a bot token starts with the bot's user ID
+	p := chat.Pinned
+	if p == nil || p.From == nil || strconv.FormatInt(p.From.ID, 10) != botID || !strings.HasPrefix(p.Text, relay.StatusPrefix) {
+		return nil, false, nil
+	}
+	return p.MessageID, true, nil
 }
 
 func (c *Client) sendMessage(ctx context.Context, chatID string, text string, replyMarkup any) error {

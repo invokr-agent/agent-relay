@@ -375,7 +375,7 @@ func (b *Bridge) handle(ctx context.Context, c *chat, msg Inbound) error {
 		if err := b.newSession(ctx, c, reached); err != nil {
 			return err
 		}
-		b.showStatus(ctx, c, reached.agent)
+		go b.showStatus(ctx, c, reached.agent) // the reply must not wait on the chat app
 		return c.t.Send(ctx, c.id, "Started a new session.")
 	case "help":
 		return c.t.Send(ctx, c.id, b.relayHelp())
@@ -387,7 +387,7 @@ func (b *Bridge) handle(ctx context.Context, c *chat, msg Inbound) error {
 		if err := b.openSession(ctx, c, reached); err != nil {
 			return err
 		}
-		b.showStatus(ctx, c, reached.agent)
+		go b.showStatus(ctx, c, reached.agent) // the reply must not wait on the chat app
 	}
 	// Drop text left by an earlier failed turn so it does not lead this reply.
 	c.set(c.reply.Reset)

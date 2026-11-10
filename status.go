@@ -14,14 +14,15 @@ type StatusBoard interface {
 	SetStatus(ctx context.Context, chatID, text string) error
 }
 
+// StatusPrefix starts every status text, so a client can tell its own status apart.
+const StatusPrefix = "🤖 "
+
 // noteSession keeps the state a session/new or session/load answer carries.
 func noteSession(c *chat, modes *acp.SessionModeState, opts []acp.SessionConfigOption) {
 	c.set(func() {
+		c.mode, c.opts = "", opts
 		if modes != nil {
 			c.mode = string(modes.CurrentModeID)
-		}
-		if opts != nil {
-			c.opts = opts
 		}
 	})
 }
@@ -62,7 +63,7 @@ func (b *Bridge) showStatus(ctx context.Context, c *chat, agent string) {
 
 // statusText reads e.g. "🤖 invokr 0.6.6 · auto · qwen · high\n📁 /home/me/app".
 func statusText(agent, cwd, mode string, opts []acp.SessionConfigOption) string {
-	head := []string{"🤖 " + agent}
+	head := []string{StatusPrefix + agent}
 	if mode != "" {
 		head = append(head, mode)
 	}
