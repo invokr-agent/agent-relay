@@ -26,6 +26,7 @@ var (
 	_ relay.Client      = (*Client)(nil)
 	_ relay.Typer       = (*Client)(nil)
 	_ relay.CommandMenu = (*Client)(nil)
+	_ relay.StatusBoard = (*Client)(nil)
 )
 
 // Client is a Telegram Bot API long-poll client.
@@ -35,6 +36,7 @@ type Client struct {
 	allowGroups    bool
 	httpClient     *http.Client
 	pending        sync.Map
+	status         sync.Map // chat ID → message ID of its pinned status
 }
 
 // New constructs a Client admitting messages from allowedUserIDs, in private
@@ -195,6 +197,55 @@ func (c *Client) SetTyping(ctx context.Context, chatID string, active bool) erro
 		return nil
 	}
 	return c.call(ctx, "sendChatAction", map[string]any{"chat_id": chatID, "action": "typing"}, nil)
+}
+
+// SetStatus keeps the status in one pinned message per chat, edited in place.
+// After a restart it adopts the chat's pinned message if the bot wrote it: the
+// bot pins nothing else, so restarts do not pile up pins.
+func (c *Client) SetStatus(ctx context.Context, chatID, text string) error {
+	id, ok := c.status.Load(chatID)
+	if !ok {
+		var err error
+		if id, ok, err = c.pinnedStatus(ctx, chatID); err != nil {
+			return err // unsure whether a status is pinned: do not pin another
+		}
+	}
+	if ok {
+		err := c.call(ctx, "editMessageText", map[string]any{"chat_id": chatID, "message_id": id, "text": text}, nil)
+		e, isAPI := errors.AsType[*tgapi.APIError](err)
+		switch {
+		case err == nil || isAPI && strings.Contains(e.Description, "not modified"):
+			c.status.Store(chatID, id)
+			return nil
+		case !isAPI || !strings.Contains(e.Description, "not found") && !strings.Contains(e.Description, "can't be edited"):
+			return err // rate limit, outage: retrying later beats a pile of pins
+		}
+	}
+	var m tgapi.Message
+	if err := c.call(ctx, "sendMessage", map[string]any{"chat_id": chatID, "text": text, "disable_notification": true}, &m); err != nil {
+		return err
+	}
+	c.status.Store(chatID, m.MessageID)
+	return c.call(ctx, "pinChatMessage", map[string]any{"chat_id": chatID, "message_id": m.MessageID, "disable_notification": true}, nil)
+}
+
+// pinnedStatus finds a status this bot pinned before a restart. The text check
+// keeps it off a bot reply the user pinned themselves.
+// shortcut: getChat sees only the newest pin, so a later pin hides the status
+// and the next restart pins another; persist the message ID if that bites.
+func (c *Client) pinnedStatus(ctx context.Context, chatID string) (any, bool, error) {
+	var chat struct {
+		Pinned *tgapi.Message `json:"pinned_message"`
+	}
+	if err := c.call(ctx, "getChat", map[string]any{"chat_id": chatID}, &chat); err != nil {
+		return nil, false, err
+	}
+	botID, _, _ := strings.Cut(c.token, ":") // a bot token starts with the bot's user ID
+	p := chat.Pinned
+	if p == nil || p.From == nil || strconv.FormatInt(p.From.ID, 10) != botID || !strings.HasPrefix(p.Text, relay.StatusPrefix) {
+		return nil, false, nil
+	}
+	return p.MessageID, true, nil
 }
 
 func (c *Client) sendMessage(ctx context.Context, chatID string, text string, replyMarkup any) error {

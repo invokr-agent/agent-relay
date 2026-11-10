@@ -4,6 +4,7 @@ Chat with a coding agent from Telegram, Matrix or Signal. agent-relay is an [ACP
 
 - **Sessions:** each chat has its own agent session. It is kept across restarts and resumed with `session/load` when the agent supports it; replayed history is not posted again.
 - **Turns:** a chat's messages run one turn at a time. The streamed answer is posted as one message, split to the platform's size limit.
+- **Status:** on Telegram a pinned message shows the agent, its mode, model and reasoning level, and the directory, and is edited as they change. Other clients show no status yet.
 - **Approvals:** permission requests become an approval prompt in the chat (buttons on Telegram, a 👍/👎 reaction or yes/no reply on Matrix, a reply on Signal). Yes picks the agent's allow-once option, no its reject-once option. Unanswered prompts are denied after 2 minutes.
 - **Commands:**
   - `/relay_new` starts a fresh session (`/new` too, unless the agent has its own `/new`).
