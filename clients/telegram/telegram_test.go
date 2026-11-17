@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -427,5 +428,113 @@ func TestNew_EmptyToken(t *testing.T) {
 	_, err := New("", nil, false)
 	if err == nil {
 		t.Fatal("expected error for empty token")
+	}
+}
+
+// The first status is sent and pinned, later ones edit it, and a restarted
+// client edits the pin its bot left instead of pinning another.
+func TestSetStatusPinsOnceThenEdits(t *testing.T) {
+	const token = "123:abc"
+	var calls []string
+	var mu sync.Mutex
+	pinned := false
+	mux := http.NewServeMux()
+	for _, method := range []string{"getChat", "sendMessage", "pinChatMessage", "editMessageText"} {
+		mux.HandleFunc("/bot"+token+"/"+method, func(w http.ResponseWriter, _ *http.Request) {
+			mu.Lock()
+			defer mu.Unlock()
+			calls = append(calls, method)
+			result := any(true)
+			switch method {
+			case "getChat":
+				chat := map[string]any{"id": 111}
+				if pinned {
+					chat["pinned_message"] = map[string]any{"message_id": 42, "from": map[string]any{"id": 123}, "text": "🤖 status"}
+				}
+				result = chat
+			case "pinChatMessage":
+				pinned = true
+			case "sendMessage", "editMessageText":
+				result = map[string]any{"message_id": 42}
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"ok": true, "result": result})
+		})
+	}
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+	var c *Client
+	for _, step := range []struct {
+		restart bool
+		want    string
+	}{{true, "getChat sendMessage pinChatMessage"}, {false, "editMessageText"}, {true, "getChat editMessageText"}} {
+		want := step.want
+		if step.restart {
+			var err error
+			if c, err = newWithBaseURL(token, nil, false, srv.URL); err != nil {
+				t.Fatal(err)
+			}
+		}
+		mu.Lock()
+		calls = nil
+		mu.Unlock()
+		if err := c.SetStatus(context.Background(), "111", "🤖 status"); err != nil {
+			t.Fatal(err)
+		}
+		mu.Lock()
+		if got := strings.Join(calls, " "); got != want {
+			t.Fatalf("calls = %q, want %q", got, want)
+		}
+		mu.Unlock()
+	}
+}
+
+// A failed edit pins a new status only when the old one is gone; a pinned
+// message that is not a status is never adopted.
+func TestSetStatusEditFailures(t *testing.T) {
+	const token = "123:abc"
+	for _, tc := range []struct {
+		name, editErr, pinnedText, want string
+		fails                           bool
+	}{
+		{"not modified", "Bad Request: message is not modified", "🤖 old", "getChat editMessageText", false},
+		{"deleted", "Bad Request: message to edit not found", "🤖 old", "getChat editMessageText sendMessage pinChatMessage", false},
+		{"rate limited", "Too Many Requests: retry after 5", "🤖 old", "getChat editMessageText", true},
+		{"user pinned a reply", "", "a useful answer", "getChat sendMessage pinChatMessage", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var calls []string
+			var mu sync.Mutex
+			mux := http.NewServeMux()
+			for _, method := range []string{"getChat", "sendMessage", "pinChatMessage", "editMessageText"} {
+				mux.HandleFunc("/bot"+token+"/"+method, func(w http.ResponseWriter, _ *http.Request) {
+					mu.Lock()
+					calls = append(calls, method)
+					mu.Unlock()
+					reply := map[string]any{"ok": true, "result": map[string]any{"message_id": 42}}
+					switch {
+					case method == "getChat":
+						reply["result"] = map[string]any{"id": 111, "pinned_message": map[string]any{
+							"message_id": 7, "from": map[string]any{"id": 123}, "text": tc.pinnedText}}
+					case method == "editMessageText" && tc.editErr != "":
+						reply = map[string]any{"ok": false, "error_code": 400, "description": tc.editErr}
+					}
+					_ = json.NewEncoder(w).Encode(reply)
+				})
+			}
+			srv := httptest.NewServer(mux)
+			t.Cleanup(srv.Close)
+			c, err := newWithBaseURL(token, nil, false, srv.URL)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := c.SetStatus(context.Background(), "111", "🤖 new"); (err != nil) != tc.fails {
+				t.Fatalf("SetStatus err = %v, want failure %v", err, tc.fails)
+			}
+			mu.Lock()
+			defer mu.Unlock()
+			if got := strings.Join(calls, " "); got != tc.want {
+				t.Fatalf("calls = %q, want %q", got, tc.want)
+			}
+		})
 	}
 }

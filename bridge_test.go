@@ -72,7 +72,7 @@ type fakeAgent struct {
 func agentOn(conn *acp.AgentConn) *fakeAgent { return &fakeAgent{conn: conn} }
 
 func (a *fakeAgent) Initialize(_ context.Context, req acp.InitializeRequest) (acp.InitializeResponse, error) {
-	return acp.InitializeResponse{ProtocolVersion: req.ProtocolVersion,
+	return acp.InitializeResponse{ProtocolVersion: req.ProtocolVersion, AgentInfo: &acp.Implementation{Name: "fake", Version: "1.0"},
 		AgentCapabilities: &acp.AgentCapabilities{LoadSession: true}}, nil
 }
 
@@ -85,7 +85,8 @@ func (a *fakeAgent) NewSession(ctx context.Context, _ acp.NewSessionRequest) (ac
 	a.known.Store(id, true)
 	err := a.conn.SessionUpdate(ctx, acp.SessionNotification{SessionID: id, Update: acp.SessionUpdate{
 		AvailableCommandsUpdate: &acp.AvailableCommandsUpdate{AvailableCommands: fakeCommands}}})
-	return acp.NewSessionResponse{SessionID: id}, err
+	return acp.NewSessionResponse{SessionID: id, Modes: &acp.SessionModeState{CurrentModeID: "auto"},
+		ConfigOptions: []acp.SessionConfigOption{{ID: "model", Category: acp.SessionConfigOptionCategoryModel, CurrentValue: json.RawMessage(`"m1"`)}}}, err
 }
 
 var fakeCommands = []acp.AvailableCommand{
@@ -125,6 +126,11 @@ func (a *fakeAgent) Prompt(ctx context.Context, req acp.PromptRequest) (acp.Prom
 	case "wait":
 		<-ctx.Done()
 		return acp.PromptResponse{}, ctx.Err()
+	case "plan":
+		if err := a.conn.SessionUpdate(ctx, acp.SessionNotification{SessionID: req.SessionID,
+			Update: acp.SessionUpdate{CurrentModeUpdate: &acp.CurrentModeUpdate{CurrentModeID: "plan"}}}); err != nil {
+			return acp.PromptResponse{}, err
+		}
 	case "die":
 		os.Exit(0) // the agent process itself goes away
 	case "run":
@@ -752,5 +758,42 @@ func TestSessionFromAReplacedAgentIsDropped(t *testing.T) {
 	}
 	if made := (<-first).sessions.Load(); made != 1 {
 		t.Fatalf("the replaced agent made %d sessions, want the calls to have run", made)
+	}
+}
+
+// boardClient is a fakeClient that also shows a status.
+type boardClient struct {
+	*fakeClient
+	status chan string
+}
+
+func (b boardClient) SetStatus(_ context.Context, _ string, text string) error {
+	b.status <- text
+	return nil
+}
+
+// The status shows on the session's first turn and follows a mode change,
+// and an unchanged state is not pushed again.
+func TestBridgeStatus(t *testing.T) {
+	chat := newFakeClient(true)
+	board := boardClient{chat, make(chan string, 8)}
+	cwd := t.TempDir()
+	startBridge(t, filepath.Join(t.TempDir(), "sessions.json"), chat, func(b *Bridge) { b.Clients, b.Cwd = []Client{board}, cwd })
+	chat.say("hi")
+	if got, want := <-board.status, "🤖 fake 1.0 · auto · m1\n📁 "+cwd; got != want {
+		t.Fatalf("status = %q, want %q", got, want)
+	}
+	chat.next(t)
+	chat.say("plan")
+	chat.next(t)
+	if got := <-board.status; !strings.HasPrefix(got, "🤖 fake 1.0 · plan · m1\n") {
+		t.Fatalf("status after mode change = %q", got)
+	}
+	chat.say("hi")
+	chat.next(t)
+	select {
+	case got := <-board.status:
+		t.Fatalf("unchanged status pushed again: %q", got)
+	case <-time.After(100 * time.Millisecond):
 	}
 }

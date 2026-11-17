@@ -65,6 +65,10 @@ type chat struct {
 	reply    strings.Builder
 	loading  bool // a session/load replay is running: its updates are history, not news
 	noticed  bool // Notice was appended to a reply; serve's goroutine only
+	mode     string
+	opts     []acp.SessionConfigOption
+	statusMu sync.Mutex // orders status pushes; guards shown
+	shown    string     // status last pushed to the client
 }
 
 func (c *chat) current() acp.SessionID {
@@ -92,6 +96,7 @@ type Reached struct {
 	conn    *acp.ClientConn
 	ctx     context.Context
 	canLoad bool
+	agent   string // name and version, as the agent reported them
 }
 
 // live is the currently reached agent, and nil until the first one answers:
@@ -223,7 +228,11 @@ func (b *Bridge) initialize(ctx context.Context, conn *acp.ClientConn) error {
 	// Published once the agent answered: a chat starting on this connection
 	// sees a reached agent, never a half-initialized one, and sees the whole
 	// replacement when Run swaps it for another agent.
-	b.reached.Store(&Reached{conn: conn, ctx: ctx, canLoad: init.AgentCapabilities != nil &&
+	agent := "agent"
+	if i := init.AgentInfo; i != nil {
+		agent = strings.TrimSpace(cmp.Or(i.Title, i.Name) + " " + i.Version)
+	}
+	b.reached.Store(&Reached{conn: conn, ctx: ctx, agent: agent, canLoad: init.AgentCapabilities != nil &&
 		init.AgentCapabilities.LoadSession})
 	return nil
 }
@@ -366,6 +375,7 @@ func (b *Bridge) handle(ctx context.Context, c *chat, msg Inbound) error {
 		if err := b.newSession(ctx, c, reached); err != nil {
 			return err
 		}
+		go b.showStatus(ctx, c, reached.agent) // the reply must not wait on the chat app
 		return c.t.Send(ctx, c.id, "Started a new session.")
 	case "help":
 		return c.t.Send(ctx, c.id, b.relayHelp())
@@ -377,6 +387,7 @@ func (b *Bridge) handle(ctx context.Context, c *chat, msg Inbound) error {
 		if err := b.openSession(ctx, c, reached); err != nil {
 			return err
 		}
+		go b.showStatus(ctx, c, reached.agent) // the reply must not wait on the chat app
 	}
 	// Drop text left by an earlier failed turn so it does not lead this reply.
 	c.set(c.reply.Reset)
@@ -411,7 +422,7 @@ func (b *Bridge) openSession(ctx context.Context, c *chat, reached *Reached) err
 	}
 	c.set(func() { c.session, c.loading = acp.SessionID(stored), true })
 	b.sessions.Store(c.current(), c)
-	_, err := reached.conn.LoadSession(ctx, acp.LoadSessionRequest{SessionID: c.current(), Cwd: b.Cwd, MCPServers: []acp.MCPServer{}})
+	resp, err := reached.conn.LoadSession(ctx, acp.LoadSessionRequest{SessionID: c.current(), Cwd: b.Cwd, MCPServers: []acp.MCPServer{}})
 	c.set(func() { c.loading = false })
 	if !b.fresh(reached) { // the agent this load asked is gone: the id belongs
 		// to it, not to the agent now live, so the chat starts over instead
@@ -421,6 +432,7 @@ func (b *Bridge) openSession(ctx context.Context, c *chat, reached *Reached) err
 		b.Logger.Warn("stored session did not load; starting a new one", "chat", c.key, "err", err)
 		return b.newSession(ctx, c, reached)
 	}
+	noteSession(c, resp.Modes, resp.ConfigOptions)
 	return nil
 }
 
@@ -436,6 +448,7 @@ func (b *Bridge) newSession(ctx context.Context, c *chat, reached *Reached) erro
 	}
 	b.sessions.Delete(c.current())
 	c.set(func() { c.session = resp.SessionID })
+	noteSession(c, resp.Modes, resp.ConfigOptions)
 	b.sessions.Store(resp.SessionID, c)
 	return b.Store.SetSessionID(c.key, string(resp.SessionID))
 }
@@ -468,6 +481,7 @@ func (b *Bridge) resetChats() {
 		b.sessions.Delete(c.current())
 		c.set(func() {
 			c.session, c.approver, c.lost, c.loading = acp.SessionID(""), "", false, false
+			c.mode, c.opts = "", nil
 			c.reply.Reset()
 		})
 	}
@@ -500,8 +514,8 @@ var stopNotes = map[acp.StopReason]string{
 	acp.StopReasonMaxTurnRequests: "✂️ the turn hit its step limit",
 }
 
-// SessionUpdate collects the agent's answer for the chat; the rest of the
-// stream (thoughts, tool calls, plans) stays out of the chat.
+// SessionUpdate collects the agent's answer for the chat and keeps its status
+// current; the rest of the stream (thoughts, tool calls, plans) stays out.
 func (b *Bridge) SessionUpdate(_ context.Context, n acp.SessionNotification) error {
 	if u := n.Update.AvailableCommandsUpdate; u != nil {
 		// Off the agent's read loop: menus call out to the chat apps.
@@ -511,6 +525,16 @@ func (b *Bridge) SessionUpdate(_ context.Context, n acp.SessionNotification) err
 		return nil
 	}
 	v, ok := b.sessions.Load(n.SessionID)
+	if ok && noteUpdate(v.(*chat), n.Update) {
+		c := v.(*chat)
+		var loading bool
+		c.set(func() { loading = c.loading })
+		// A load's replay is history; openSession shows the state it ends on.
+		if reached := b.live(); reached != nil && !loading {
+			go b.showStatus(reached.ctx, c, reached.agent) // off the agent's read loop
+		}
+		return nil
+	}
 	chunk := n.Update.AgentMessageChunk
 	if !ok || chunk == nil || chunk.Content.Text == nil {
 		return nil
